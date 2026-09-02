@@ -11,7 +11,7 @@ export const Navigation = () => {
     >
       <div className="flex items-center gap-3 pl-2">
         <div className="h-2 w-2 rounded-full bg-gradient-to-r from-synapse-violet to-synapse-cyan"></div>
-        <span className="font-serif text-xl tracking-tight text-white">SeaDrop Sniper</span>
+        <span className="font-serif text-xl tracking-tight text-white">LastLap MintGrid</span>
       </div>
 
       <div className="hidden md:flex items-center gap-8">

@@ -140,7 +140,7 @@ export const WalletLogin = ({ onLogin }: WalletLoginProps) => {
       const issuedAt = new Date();
       const expirationTime = new Date(issuedAt.getTime() + 5 * 60 * 1000);
       const domain = window.location.host;
-      const message = `${domain} wants you to sign in with your Ethereum account:\n${address}\n\nSign in to the SeaDrop Sniper dashboard.\n\nURI: ${window.location.origin}\nVersion: 1\nChain ID: ${network.chainId.toString()}\nNonce: ${nonceData.nonce}\nIssued At: ${issuedAt.toISOString()}\nExpiration Time: ${expirationTime.toISOString()}`;
+      const message = `${domain} wants you to sign in with your Ethereum account:\n${address}\n\nSign in to the LastLap MintGrid dashboard.\n\nURI: ${window.location.origin}\nVersion: 1\nChain ID: ${network.chainId.toString()}\nNonce: ${nonceData.nonce}\nIssued At: ${issuedAt.toISOString()}\nExpiration Time: ${expirationTime.toISOString()}`;
       const signature = await signer.signMessage(message);
 
       // 3. Verify Signature

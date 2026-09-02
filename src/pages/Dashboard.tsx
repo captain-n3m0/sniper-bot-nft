@@ -155,7 +155,7 @@ export const Dashboard = () => {
         <div className="flex items-center gap-6">
           <Link to="/" className="flex items-center gap-3 transition-opacity hover:opacity-80">
             <div className="h-2 w-2 rounded-full bg-gradient-to-r from-synapse-violet to-synapse-cyan"></div>
-            <span className="font-serif text-xl tracking-tight text-white">SeaDrop Sniper</span>
+            <span className="font-serif text-xl tracking-tight text-white">LastLap MintGrid</span>
           </Link>
           <div className="h-4 w-px bg-white/10 hidden md:block"></div>
           <span className="text-xs font-mono uppercase tracking-widest text-neutral-500 hidden md:block">Cloud Terminal</span>

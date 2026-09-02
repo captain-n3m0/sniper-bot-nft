@@ -4,7 +4,7 @@ export const Footer = () => {
       <div className="mx-auto max-w-7xl">
         <div className="grid grid-cols-1 gap-12 md:grid-cols-4">
           <div className="col-span-1 md:col-span-1">
-            <span className="font-serif text-4xl text-white">SeaDrop Sniper</span>
+            <span className="font-serif text-4xl text-white">LastLap MintGrid</span>
             <p className="mt-4 max-w-xs text-sm text-neutral-500">
               The fastest web platform for sniping OpenSea public mints on Ethereum, Polygon, and Base.
             </p>

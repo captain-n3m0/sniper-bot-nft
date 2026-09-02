@@ -1,6 +1,6 @@
 {
-  "name": "Synapse",
-  "description": "The Synapse design system is a futuristic, dark-themed interface.",
+  "name": "LastLap MintGrid",
+  "description": "A high-speed, multi-chain NFT mint execution platform by LastLap.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
