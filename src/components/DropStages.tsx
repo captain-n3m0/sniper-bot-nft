@@ -1,13 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Layers, AlertCircle, Loader2, Calendar, ShieldCheck, CheckCircle2, XCircle, Clock, Zap, ArrowRight, Check } from 'lucide-react';
+import { Layers, AlertCircle, Loader2, Calendar, ShieldCheck, CheckCircle2, XCircle, Clock, Zap, ArrowRight, Check, FileSearch, X } from 'lucide-react';
+import { formatEther } from 'ethers';
 import { StoredWallet } from './WalletManager';
 
 interface DropStagesProps {
   wallets: StoredWallet[];
-  authenticatedAddress?: string | null;
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
-  onSelectStageForSniper?: (contractAddress: string, stage: any) => void;
+  onDetectedChain?: (chain: string) => void;
+  onSelectStageForSniper?: (
+    contractAddress: string,
+    stage: any,
+    context: { chain: string; slug?: string; openseaApiKey?: string },
+  ) => void;
   onSelectStageForScheduler?: (contractAddress: string, targetTime: string) => void;
 }
 
@@ -24,11 +29,38 @@ interface StageInfo {
   raw: any;
 }
 
+interface TransactionVerification {
+  address: string;
+  to: string;
+  data: string;
+  value: string;
+  chain: string;
+  chainId: number;
+  source: string;
+  decoded: {
+    method: string;
+    nftContract?: string;
+    feeRecipient?: string;
+    minter?: string;
+    quantity?: string;
+    recipientMatches?: boolean;
+    expectedValue?: string;
+    valueMatches?: boolean;
+  };
+  verification: {
+    ok: boolean;
+    eligibilityVerified?: boolean;
+    inconclusive?: boolean;
+    reason?: string;
+    warning?: string;
+  };
+}
+
 export const DropStages = ({
   wallets,
-  authenticatedAddress,
   addLog,
   selectedChain,
+  onDetectedChain,
   onSelectStageForSniper,
   onSelectStageForScheduler
 }: DropStagesProps) => {
@@ -41,8 +73,16 @@ export const DropStages = ({
   const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
 
   const [simulatingStage, setSimulatingStage] = useState<string | null>(null);
+  const [transactionPreview, setTransactionPreview] = useState<TransactionVerification | null>(null);
   const [simulationResults, setSimulationResults] = useState<{
-    [stageId: string]: { eligible: string[]; notEligible: { address: string; reason: string }[]; isAllowlistPending?: boolean };
+    [stageId: string]: {
+      eligible: string[];
+      notEligible: { address: string; reason: string }[];
+      unknown?: { address: string; reason: string }[];
+      warnings?: { address: string; reason: string }[];
+      transactions?: TransactionVerification[];
+      isAllowlistPending?: boolean;
+    };
   }>({});
 
   const [currentTime, setCurrentTime] = useState<number>(Math.floor(Date.now() / 1000));
@@ -131,7 +171,12 @@ export const DropStages = ({
         startTime: startSec,
         endTime: endSec,
         priceEth,
-        maxMintsPerWallet: st.max_mints_per_wallet || st.maxMintsPerWallet || '∞',
+        maxMintsPerWallet:
+          st.max_mints_per_wallet ??
+          st.max_per_wallet ??
+          st.maxMintsPerWallet ??
+          st.maxPerWallet ??
+          '∞',
         status,
         timeRemainingStr,
         raw: st
@@ -159,7 +204,7 @@ export const DropStages = ({
       const response = await fetch('/api/opensea/drop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slug: slug.trim(), apiKey: apiKey.trim() })
+        body: JSON.stringify({ slug: slug.trim(), chain: selectedChain, apiKey: apiKey.trim() })
       });
 
       const data = await response.json();
@@ -168,6 +213,14 @@ export const DropStages = ({
         throw new Error(data.error || 'Failed to fetch drop schedule from OpenSea.');
       }
 
+      if (data.chain && data.chain !== selectedChain) {
+        onDetectedChain?.(data.chain);
+        addLog(
+          'NETWORK',
+          `OpenSea reports this collection on ${data.chain}; target switched from ${selectedChain} to ${data.chain}.`,
+          'text-yellow-500',
+        );
+      }
       setDropData(data);
       const parsed = parseStages(data);
       setStages(parsed);
@@ -184,24 +237,41 @@ export const DropStages = ({
   };
 
   const handleSimulateStage = async (stage: StageInfo) => {
-    const targetWallets = wallets.length > 0
-      ? wallets.map(w => w.address)
-      : (authenticatedAddress ? [authenticatedAddress] : ['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045']);
+    const targetWallets = Array.from(
+      new Map(
+        wallets
+          .map((wallet) => wallet.address)
+          .map((address) => [address.toLowerCase(), address]),
+      ).values(),
+    );
+
+    if (targetWallets.length === 0) {
+      setError('Import at least one execution wallet in Wallet Manager before checking eligibility. Your login wallet is never checked automatically.');
+      return;
+    }
 
     setSimulatingStage(stage.id);
     setError('');
 
-    addLog('SYSTEM', `Checking on-chain eligibility for stage "${stage.label}" with ${targetWallets.length} wallet(s)...`, 'text-synapse-cyan');
+    addLog('SYSTEM', `Checking ${targetWallets.length} explicitly imported execution wallet(s) for stage "${stage.label}"...`, 'text-synapse-cyan');
 
     try {
       const contractTarget = dropData?.contract_address || dropData?.address || dropData?.contracts?.[0]?.address || slug;
-      const isPresale = stage.phase === 'presale' || stage.label.toLowerCase().includes('allowlist');
+      const stageDescriptor = `${stage.phase} ${stage.label}`.toLowerCase();
+      const isPresale = ['presale', 'allowlist', 'private', 'token-gated', 'token gated', 'signed']
+        .some((marker) => stageDescriptor.includes(marker));
 
+      const targetChain = dropData?.chain || selectedChain;
       const payload = {
-        chain: selectedChain,
+        chain: targetChain,
         contractAddress: contractTarget,
-        quantity: typeof stage.maxMintsPerWallet === 'number' ? stage.maxMintsPerWallet : 1,
+        quantity: 1,
         isAllowlist: isPresale,
+        slug: dropData?.slug || (!slug.startsWith('0x') ? slug : undefined),
+        openseaApiKey: apiKey.trim(),
+        stageStatus: stage.status,
+        stageStartTime: stage.startTime,
+        stageEndTime: stage.endTime,
         mintParams: null,
         salt: '',
         signature: '',
@@ -221,13 +291,20 @@ export const DropStages = ({
       }
 
       setSimulationResults(prev => ({ ...prev, [stage.id]: data }));
+      if (data.transactions?.length === 1) {
+        setTransactionPreview(data.transactions[0]);
+      }
 
       if (data.eligible && data.eligible.length > 0) {
-        addLog('SUCCESS', `On-chain check passed: ${data.eligible.length} wallet(s) eligible for ${stage.label}!`, 'text-synapse-emerald');
-      } else if (data.isAllowlistPending) {
-        addLog('INFO', `Allowlist stage "${stage.label}": OpenSea issues signed vouchers once the stage is officially active.`, 'text-synapse-violet');
+        if (data.warnings?.length) {
+          addLog('SUCCESS', `OpenSea access confirmed for ${data.eligible.length} wallet(s) in "${stage.label}". Review the execution warning before minting.`, 'text-synapse-emerald');
+        } else {
+          addLog('SUCCESS', `Exact on-chain dry-run passed: ${data.eligible.length} wallet(s) can mint from "${stage.label}".`, 'text-synapse-emerald');
+        }
+      } else if (data.unknown?.length || data.warnings?.length || data.isAllowlistPending) {
+        addLog('INFO', `Eligibility could not be confirmed for "${stage.label}". See the checker result for details.`, 'text-yellow-500');
       } else {
-        addLog('WARNING', `Simulation check completed for "${stage.label}". Wallets are not yet eligible or stage is pending on-chain.`, 'text-yellow-500');
+        addLog('WARNING', `Simulation confirmed that the checked wallet(s) cannot mint one token from "${stage.label}".`, 'text-yellow-500');
       }
     } catch (err: any) {
       addLog('ERROR', `Eligibility check failed: ${err.message}`, 'text-red-500');
@@ -235,7 +312,8 @@ export const DropStages = ({
         ...prev,
         [stage.id]: {
           eligible: [],
-          notEligible: targetWallets.map(addr => ({ address: addr, reason: err.message }))
+          notEligible: [],
+          unknown: targetWallets.map(addr => ({ address: addr, reason: err.message }))
         }
       }));
     } finally {
@@ -259,7 +337,7 @@ export const DropStages = ({
 
       <div className="mb-6 rounded-xl border border-synapse-cyan/20 bg-synapse-cyan/5 p-4 text-xs text-synapse-cyan">
         <p className="leading-relaxed">
-          <strong>Direct OpenSea Feed:</strong> Mint schedules and live start times are retrieved directly from OpenSea. OpenSea's API does not expose per-wallet eligibility until a drop is actively live; click <strong>Check Wallet Eligibility</strong> to simulate the actual transaction on-chain via the RPC node.
+          <strong>Execution-wallet checks only:</strong> The checker tests wallets explicitly imported in Wallet Manager—never the wallet used to log in. With an OpenSea API key it builds the exact active mint action; otherwise public stages use a funded on-chain dry run.
         </p>
       </div>
 
@@ -287,7 +365,7 @@ export const DropStages = ({
           </div>
           <div>
             <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">
-              OpenSea API Key (Required for Drops API)
+              OpenSea API Key (Optional)
             </label>
             <input
               type="password"
@@ -296,6 +374,9 @@ export const DropStages = ({
               className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
               placeholder="Your OpenSea API Key"
             />
+            <p className="mt-2 text-[11px] text-neutral-500">
+              Leave blank to use a temporary server-side OpenSea key. It is never tied to your login wallet.
+            </p>
           </div>
         </div>
 
@@ -311,6 +392,12 @@ export const DropStages = ({
 
       {dropData && (
         <div className="space-y-6">
+          {dropData.chain_mismatch && (
+            <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4 font-mono text-xs text-yellow-400">
+              OpenSea located this drop on {String(dropData.chain_mismatch.detected).toUpperCase()}.
+              The previous {String(dropData.chain_mismatch.requested).toUpperCase()} target was replaced to prevent a cross-chain simulation.
+            </div>
+          )}
           {/* Drop Summary */}
           <div className="rounded-xl border border-white/10 bg-black/30 p-6">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -498,7 +585,13 @@ export const DropStages = ({
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const target = dropData?.contract_address || dropData?.address || dropData?.contracts?.[0]?.address || slug;
-                                  onSelectStageForSniper(target, stage);
+                                  const targetChain = dropData?.chain || selectedChain;
+                                  onDetectedChain?.(targetChain);
+                                  onSelectStageForSniper(target, stage, {
+                                    chain: targetChain,
+                                    slug: dropData?.slug || (!slug.startsWith('0x') ? slug : undefined),
+                                    openseaApiKey: apiKey.trim() || undefined,
+                                  });
                                 }}
                                 className="flex items-center justify-center gap-1.5 rounded-xl border border-synapse-violet/30 bg-synapse-violet/10 px-3 py-2 font-mono text-xs text-synapse-violet transition-colors hover:bg-synapse-violet/20"
                               >
@@ -558,7 +651,7 @@ export const DropStages = ({
                               <div className="flex items-center gap-2 text-red-500 mb-2">
                                 <XCircle size={14} />
                                 <span className="font-mono text-xs font-bold uppercase tracking-widest">
-                                  Reverted / Not Live ({result.notEligible.length})
+                                  Not Eligible ({result.notEligible.length})
                                 </span>
                               </div>
                               <div className="max-h-24 overflow-y-auto custom-scrollbar space-y-1">
@@ -577,6 +670,92 @@ export const DropStages = ({
                                 )}
                               </div>
                             </div>
+
+                            {(result.unknown?.length || 0) > 0 && (
+                              <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-3 md:col-span-2">
+                                <div className="mb-2 flex items-center gap-2 text-yellow-500">
+                                  <AlertCircle size={14} />
+                                  <span className="font-mono text-xs font-bold uppercase tracking-widest">
+                                    Could Not Verify ({result.unknown?.length || 0})
+                                  </span>
+                                </div>
+                                <div className="max-h-24 space-y-1 overflow-y-auto custom-scrollbar">
+                                  {result.unknown?.map((item) => (
+                                    <div
+                                      key={item.address}
+                                      className="truncate font-mono text-[10px] text-yellow-400"
+                                      title={item.reason}
+                                    >
+                                      {item.address.slice(0, 6)}...{item.address.slice(-4)}: {item.reason}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {(result.warnings?.length || 0) > 0 && (
+                              <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-3 md:col-span-2">
+                                <div className="mb-2 flex items-center gap-2 text-yellow-500">
+                                  <AlertCircle size={14} />
+                                  <span className="font-mono text-xs font-bold uppercase tracking-widest">
+                                    Eligible — Action Required ({result.warnings?.length || 0})
+                                  </span>
+                                </div>
+                                <div className="max-h-24 space-y-1 overflow-y-auto custom-scrollbar">
+                                  {result.warnings?.map((item) => (
+                                    <div
+                                      key={item.address}
+                                      className="truncate font-mono text-[10px] text-yellow-400"
+                                      title={item.reason}
+                                    >
+                                      {item.address.slice(0, 6)}...{item.address.slice(-4)}: {item.reason}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {(result.transactions?.length || 0) > 0 && (
+                              <div className="rounded-xl border border-synapse-cyan/20 bg-synapse-cyan/5 p-3 md:col-span-2">
+                                <div className="mb-2 flex items-center gap-2 text-synapse-cyan">
+                                  <FileSearch size={14} />
+                                  <span className="font-mono text-xs font-bold uppercase tracking-widest">
+                                    Exact Unsigned Transactions ({result.transactions?.length || 0})
+                                  </span>
+                                </div>
+                                <div className="space-y-2">
+                                  {result.transactions?.map((transaction) => (
+                                    <button
+                                      key={`${transaction.address}-${transaction.data}`}
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setTransactionPreview(transaction);
+                                      }}
+                                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-left transition-colors hover:border-synapse-cyan/40"
+                                    >
+                                      <div className="min-w-0">
+                                        <div className="truncate font-mono text-[11px] text-white">
+                                          {transaction.address} · {transaction.decoded.method}
+                                        </div>
+                                        <div className="mt-0.5 font-mono text-[10px] text-neutral-500">
+                                          {transaction.verification.ok
+                                            ? 'RPC VERIFIED'
+                                            : transaction.verification.eligibilityVerified
+                                              ? 'OPENSEA ACCESS VERIFIED'
+                                              : transaction.verification.inconclusive
+                                                ? 'RPC INCONCLUSIVE'
+                                                : 'RPC REJECTED'} · NOT BROADCAST
+                                        </div>
+                                      </div>
+                                      <span className="shrink-0 font-mono text-[10px] font-semibold text-synapse-cyan">
+                                        VIEW TRANSACTION
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -585,6 +764,96 @@ export const DropStages = ({
                 })}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {transactionPreview && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md"
+          onClick={() => setTransactionPreview(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Unsigned transaction verification"
+            className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-synapse-cyan/30 bg-[#080b0d] p-6 shadow-[0_0_60px_rgba(6,182,212,0.15)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-5 flex items-start justify-between gap-4 border-b border-white/10 pb-4">
+              <div>
+                <div className="flex items-center gap-2 text-synapse-cyan">
+                  <FileSearch size={18} />
+                  <h3 className="font-serif text-xl text-white">Unsigned Transaction Verification</h3>
+                </div>
+                <p className="mt-2 text-xs text-neutral-400">
+                  Preview only. No wallet signature was requested and nothing was broadcast.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTransactionPreview(null)}
+                className="rounded-lg border border-white/10 p-2 text-neutral-400 transition-colors hover:bg-white/10 hover:text-white"
+                aria-label="Close transaction verification"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className={`mb-5 rounded-xl border p-4 ${
+              transactionPreview.verification.ok || transactionPreview.verification.eligibilityVerified
+                ? 'border-synapse-emerald/30 bg-synapse-emerald/10 text-synapse-emerald'
+                : transactionPreview.verification.inconclusive
+                  ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-400'
+                  : 'border-red-500/30 bg-red-500/10 text-red-400'
+            }`}>
+              <div className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-widest">
+                {transactionPreview.verification.ok || transactionPreview.verification.eligibilityVerified ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+                {transactionPreview.verification.ok
+                  ? 'Exact RPC dry-run passed'
+                  : transactionPreview.verification.eligibilityVerified
+                    ? 'OpenSea stage access verified'
+                    : transactionPreview.verification.inconclusive
+                      ? 'RPC result inconclusive'
+                      : 'Exact RPC dry-run rejected'}
+              </div>
+              {(transactionPreview.verification.warning || transactionPreview.verification.reason) && (
+                <p className="mt-2 text-xs normal-case tracking-normal">
+                  {transactionPreview.verification.warning || transactionPreview.verification.reason}
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-2">
+              {[
+                ['Execution wallet', transactionPreview.address],
+                ['Network', `${transactionPreview.chain} (${transactionPreview.chainId})`],
+                ['Target contract', transactionPreview.to],
+                ['Method', transactionPreview.decoded.method],
+                ['Mint recipient', transactionPreview.decoded.minter || 'Not decoded'],
+                ['Recipient matches wallet', transactionPreview.decoded.recipientMatches === undefined ? 'Not decoded' : transactionPreview.decoded.recipientMatches ? 'Yes' : 'No'],
+                ['NFT contract', transactionPreview.decoded.nftContract || 'Not decoded'],
+                ['Quantity', transactionPreview.decoded.quantity || 'Not decoded'],
+                ['Value', `${transactionPreview.value} wei (${formatEther(BigInt(transactionPreview.value))} ${transactionPreview.chain === 'polygon' ? 'POL' : 'ETH'})`],
+                ['Signed-mint value matches', transactionPreview.decoded.valueMatches === undefined ? 'Not applicable' : transactionPreview.decoded.valueMatches ? 'Yes' : 'No'],
+                ['Source', transactionPreview.source],
+                ['Broadcast status', 'NOT BROADCAST'],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-xl border border-white/5 bg-black/30 p-3">
+                  <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-neutral-500">{label}</div>
+                  <div className="break-all font-mono text-[11px] text-neutral-200">{value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 rounded-xl border border-white/5 bg-black/40 p-4">
+              <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-neutral-500">
+                Exact calldata
+              </div>
+              <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed text-synapse-cyan/80">
+                {transactionPreview.data}
+              </pre>
+            </div>
           </div>
         </div>
       )}

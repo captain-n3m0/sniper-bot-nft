@@ -1,0 +1,18 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "seaDropAddress": "0x00005EA00Ac477B1030CE78506496e8C2dE24bf5",
+  "contractAddress": "0x047889fF48b2218d7306f64ba516815C10d4CEE9",
+  "deployer": "0x6091F294c3911A09bD4A05dc29d5E2c998F74Ee6",
+  "deployTransactionHash": "0x898d04cbff322092cf89e20792b05f2516c8a0dd9ea6d87b4adc95877f6eb04d",
+  "configurationTransactionHash": "0x66ce810704beedf920489438f6919137502179823591ff19b83e17c33e1d522f",
+  "stage": {
+    "mintPrice": "0",
+    "startsAt": "2026-09-02T08:10:00.000Z",
+    "endsAt": "2026-09-03T08:10:00.000Z",
+    "maxPerWallet": 3,
+    "maxSupply": 100,
+    "restrictFeeRecipients": true
+  },
+  "explorer": "https://sepolia.etherscan.io/address/0x047889fF48b2218d7306f64ba516815C10d4CEE9"
+}

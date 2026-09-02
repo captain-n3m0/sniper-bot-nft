@@ -12,7 +12,6 @@ import { WalletLogin } from '../components/WalletLogin';
 
 export const Dashboard = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authenticatedAddress, setAuthenticatedAddress] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'sniper' | 'wallets' | 'stages' | 'scheduler' | 'gas'>('sniper');
   const [wallets, setWallets] = useState<StoredWallet[]>([]);
@@ -26,7 +25,9 @@ export const Dashboard = () => {
     isAllowlist: false,
     mintParams: '',
     salt: '',
-    signature: ''
+    signature: '',
+    openSeaSlug: '',
+    openSeaApiKey: ''
   });
 
   const [logs, setLogs] = useState<{ time: string; type: string; message: string; color: string }[]>([
@@ -85,27 +86,53 @@ export const Dashboard = () => {
           isAllowlist: form.isAllowlist,
           mintParams: mintParamsObj,
           salt: form.salt,
-          signature: form.signature
+          signature: form.signature,
+          slug: form.openSeaSlug || undefined,
+          openseaApiKey: form.openSeaApiKey || undefined
         };
 
-        const res = await fetch('/api/snipe/seadrop', {
+        const prepareRes = await fetch('/api/prepare-mint', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
 
-        const data = await res.json();
-
-        if (data.success) {
-          addLog('SUCCESS', `Payload generated! Value: ${data.plan.value} wei`, 'text-synapse-emerald');
-          if (data.txHash) {
-            addLog('SUCCESS', `Transaction broadcasted! Hash: ${data.txHash}`, 'text-synapse-emerald');
-          } else {
-            addLog('WARNING', data.msg, 'text-yellow-500');
-          }
-        } else {
-          addLog('ERROR', data.error, 'text-red-500');
+        const prepared = await prepareRes.json();
+        if (!prepareRes.ok || !prepared.success) {
+          throw new Error(prepared.error || 'Failed to prepare mint transaction');
         }
+
+        addLog('SUCCESS', `Payload generated! Value: ${prepared.plan.value} wei`, 'text-synapse-emerald');
+        if (prepared.plan.source === 'opensea-mint-action') {
+          addLog(
+            'NETWORK',
+            `Using OpenSea's exact ${prepared.plan.decoded?.method || 'mint'} action for this wallet.`,
+            'text-synapse-cyan',
+          );
+        }
+        if (!wallet) {
+          addLog('WARNING', 'Dry run complete. Select a wallet to broadcast.', 'text-yellow-500');
+          continue;
+        }
+        if (prepared.simulation && !prepared.simulation.ok) {
+          throw new Error(`Simulation failed: ${prepared.simulation.reason}`);
+        }
+
+        const blastRes = await fetch('/api/blast-mint', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chain: selectedChain,
+            apiKey: form.apiKey,
+            transaction: prepared.transaction,
+            privateKey: wallet.privateKey
+          })
+        });
+        const blasted = await blastRes.json();
+        if (!blastRes.ok || !blasted.success) {
+          throw new Error(blasted.error || 'Failed to broadcast mint transaction');
+        }
+        addLog('SUCCESS', `Transaction broadcasted! Hash: ${blasted.txHash}`, 'text-synapse-emerald');
       }
     } catch (err: any) {
       addLog('ERROR', err.message, 'text-red-500');
@@ -118,9 +145,8 @@ export const Dashboard = () => {
     <>
       {!isAuthenticated && (
         <WalletLogin onLogin={(address) => {
-          setAuthenticatedAddress(address);
           setIsAuthenticated(true);
-          addLog('SYSTEM', `Authenticated as ${address}`, 'text-synapse-emerald');
+          addLog('SYSTEM', `Authenticated as ${address}. This wallet is login-only and is not an execution wallet.`, 'text-synapse-emerald');
         }} />
       )}
       <main className={`min-h-screen bg-[#030303] text-white selection:bg-synapse-violet/30 pb-24 ${!isAuthenticated ? 'opacity-0 pointer-events-none' : 'opacity-100 transition-opacity duration-1000'}`}>
@@ -195,7 +221,11 @@ export const Dashboard = () => {
                   <input 
                     type="text" 
                     value={form.contractAddress}
-                    onChange={(e) => setForm({...form, contractAddress: e.target.value})}
+                    onChange={(e) => setForm({
+                      ...form,
+                      contractAddress: e.target.value,
+                      openSeaSlug: ''
+                    })}
                     className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-violet/50 focus:bg-white/5 transition-colors"
                     placeholder="0x... or opensea-slug"
                     required
@@ -226,6 +256,19 @@ export const Dashboard = () => {
                     placeholder="Alchemy API Key or https://..."
                   />
                   <p className="mt-2 text-xs text-neutral-500">Bypasses public rate-limits. Strongly recommended for high-competition mints.</p>
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">OpenSea API Key</label>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={form.openSeaApiKey}
+                    onChange={(e) => setForm({...form, openSeaApiKey: e.target.value})}
+                    className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
+                    placeholder="Required for OpenSea-signed mint phases"
+                  />
+                  <p className="mt-2 text-xs text-neutral-500">Used only by this backend to obtain the exact wallet-specific mint transaction.</p>
                 </div>
 
                 <div className="pt-4 border-t border-white/5">
@@ -308,18 +351,21 @@ export const Dashboard = () => {
             {activeTab === 'stages' && (
               <DropStages 
                 wallets={wallets} 
-                authenticatedAddress={authenticatedAddress}
                 addLog={addLog} 
                 selectedChain={selectedChain}
-                onSelectStageForSniper={(contractAddress, stage) => {
+                onDetectedChain={setSelectedChain}
+                onSelectStageForSniper={(contractAddress, stage, context) => {
+                  setSelectedChain(context.chain);
                   setForm(prev => ({
                     ...prev,
                     contractAddress,
-                    quantity: typeof stage.maxMintsPerWallet === 'number' ? String(stage.maxMintsPerWallet) : '1',
-                    isAllowlist: stage.phase === 'presale' || stage.label.toLowerCase().includes('allowlist')
+                    quantity: '1',
+                    isAllowlist: stage.phase === 'presale' || stage.label.toLowerCase().includes('allowlist'),
+                    openSeaSlug: context.slug || '',
+                    openSeaApiKey: context.openseaApiKey || ''
                   }));
                   setActiveTab('sniper');
-                  addLog('INFO', `Stage "${stage.label}" loaded into Sniper configuration.`, 'text-synapse-violet');
+                  addLog('INFO', `Stage "${stage.label}" loaded on ${context.chain}; OpenSea mint-action verification enabled.`, 'text-synapse-violet');
                 }}
                 onSelectStageForScheduler={(contractAddress, targetTime) => {
                   setActiveTab('scheduler');

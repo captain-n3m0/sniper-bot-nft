@@ -23,7 +23,7 @@ export const CodeBlock = () => {
           </button>
         </div>
         <div className="p-8 font-mono text-sm leading-loose md:text-base">
-          <p><span className="text-synapse-violet">POST</span> <span className="text-white">/api/snipe/seadrop</span> <span className="text-synapse-cyan">HTTP/2</span></p>
+          <p><span className="text-synapse-violet">POST</span> <span className="text-white">/api/prepare-mint</span> <span className="text-synapse-cyan">HTTP/2</span></p>
           <br />
           <p><span className="text-neutral-500">[{'14:59:58.201'}]</span> <span className="text-synapse-violet">INFO</span> Authenticating wallet signature...</p>
           <p><span className="text-neutral-500">[{'14:59:58.455'}]</span> <span className="text-synapse-violet">INFO</span> Connecting to dedicated Blast RPC...</p>

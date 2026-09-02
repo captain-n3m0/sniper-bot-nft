@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+.sepolia-test-deployer.json
+.opensea-key-cache.json
+.opensea-key-cache.json.*.tmp

@@ -84,7 +84,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
         chain: selectedChain
       };
 
-      const response = await fetch('/api/schedule-mint', {
+      const response = await fetch('/api/scheduler/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
