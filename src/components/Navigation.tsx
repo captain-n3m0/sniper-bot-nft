@@ -2,6 +2,13 @@ import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
 
 export const Navigation = () => {
+  const items = [
+    { label: 'Dashboard', to: '/dashboard' },
+    { label: 'Metrics', to: '/metrics' },
+    { label: 'Features', to: '/#features' },
+    { label: 'Status', to: '/status' },
+  ];
+
   return (
     <motion.nav
       initial={{ y: -50, opacity: 0, x: "-50%" }}
@@ -15,10 +22,10 @@ export const Navigation = () => {
       </div>
 
       <div className="hidden md:flex items-center gap-8">
-        {['Dashboard', 'Metrics', 'Features', 'Status'].map((item) => (
-          <a key={item} href={item === 'Dashboard' ? '/dashboard' : `/#${item.toLowerCase()}`} className="text-xs font-semibold uppercase tracking-widest text-neutral-400 transition-colors hover:text-white">
-            {item}
-          </a>
+        {items.map((item) => (
+          <Link key={item.label} to={item.to} className="text-xs font-semibold uppercase tracking-widest text-neutral-400 transition-colors hover:text-white">
+            {item.label}
+          </Link>
         ))}
       </div>
 

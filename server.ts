@@ -25,6 +25,7 @@ import { generateNonce, SiweMessage } from "siwe";
 
 const HOST = "0.0.0.0";
 const PORT = Number(process.env.PORT || 3000);
+const PROCESS_STARTED_AT = Date.now();
 const RPC_TIMEOUT_MS = 7_000;
 const MAX_WALLETS = 100;
 const SEADROP_ADDRESS = "0x00005EA00Ac477B1030CE78506496e8C2dE24bf5";
@@ -2458,10 +2459,158 @@ const authCleanupInterval = setInterval(() => {
 }, 60_000);
 authCleanupInterval.unref();
 
+interface RequestMetricBucket {
+  minute: number;
+  requests: number;
+  errors: number;
+  durationMs: number;
+  maxLatencyMs: number;
+}
+
+const requestMetricBuckets = new Map<number, RequestMetricBucket>();
+const endpointMetrics = new Map<string, { requests: number; errors: number; durationMs: number }>();
+let totalApiRequests = 0;
+let totalApiErrors = 0;
+let totalApiDurationMs = 0;
+
+function normalizedMetricPath(req: Request) {
+  const routePath = typeof req.route?.path === "string" ? req.route.path : req.path;
+  return `${req.method} ${routePath}`
+    .replace(/0x[0-9a-f]{64}/gi, ":txHash")
+    .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id");
+}
+
+function recordRequestMetric(req: Request, status: number, durationMs: number) {
+  if (!req.path.startsWith("/api/") || ["/api/metrics", "/api/status", "/api/health"].includes(req.path)) return;
+  totalApiRequests += 1;
+  totalApiDurationMs += durationMs;
+  if (status >= 400) totalApiErrors += 1;
+  const minute = Math.floor(Date.now() / 60_000) * 60_000;
+  const bucket = requestMetricBuckets.get(minute) || {
+    minute,
+    requests: 0,
+    errors: 0,
+    durationMs: 0,
+    maxLatencyMs: 0,
+  };
+  bucket.requests += 1;
+  bucket.durationMs += durationMs;
+  bucket.maxLatencyMs = Math.max(bucket.maxLatencyMs, durationMs);
+  if (status >= 400) bucket.errors += 1;
+  requestMetricBuckets.set(minute, bucket);
+  for (const key of requestMetricBuckets.keys()) {
+    if (key < minute - 119 * 60_000) requestMetricBuckets.delete(key);
+  }
+
+  const path = normalizedMetricPath(req);
+  const endpoint = endpointMetrics.get(path) || { requests: 0, errors: 0, durationMs: 0 };
+  endpoint.requests += 1;
+  endpoint.durationMs += durationMs;
+  if (status >= 400) endpoint.errors += 1;
+  endpointMetrics.set(path, endpoint);
+}
+
+function metricSeries(minutes = 60) {
+  const currentMinute = Math.floor(Date.now() / 60_000) * 60_000;
+  return Array.from({ length: minutes }, (_, index) => {
+    const minute = currentMinute - (minutes - index - 1) * 60_000;
+    const bucket = requestMetricBuckets.get(minute);
+    return {
+      timestamp: new Date(minute).toISOString(),
+      requests: bucket?.requests || 0,
+      errors: bucket?.errors || 0,
+      averageLatencyMs: bucket?.requests ? Math.round(bucket.durationMs / bucket.requests) : 0,
+      maxLatencyMs: bucket?.maxLatencyMs || 0,
+    };
+  });
+}
+
+function databaseOperational() {
+  try {
+    database().prepare("SELECT 1 AS ok").get();
+    return true;
+  } catch (error) {
+    logServerError("status-database", error);
+    return false;
+  }
+}
+
+interface NetworkStatus {
+  key: string;
+  name: string;
+  chainId: number;
+  status: "operational" | "degraded";
+  latencyMs: number | null;
+  blockNumber: number | null;
+}
+
+let statusCache: { expiresAt: number; value?: any; pending?: Promise<any> } = { expiresAt: 0 };
+
+async function operationalStatus() {
+  if (statusCache.value && statusCache.expiresAt > Date.now()) return statusCache.value;
+  if (statusCache.pending) return statusCache.pending;
+  statusCache.pending = (async () => {
+    const networks: NetworkStatus[] = await Promise.all(
+      CHAINS.map(async (chain) => {
+        const startedAt = Date.now();
+        try {
+          const endpoints = rpcUrlsFor(chain).slice(0, 4);
+          const blockNumber = await Promise.any(
+            endpoints.map((url) => providerFor(url, chain).getBlockNumber()),
+          );
+          return {
+            key: chain.key,
+            name: chain.name,
+            chainId: chain.chainId,
+            status: "operational" as const,
+            latencyMs: Date.now() - startedAt,
+            blockNumber,
+          };
+        } catch {
+          return {
+            key: chain.key,
+            name: chain.name,
+            chainId: chain.chainId,
+            status: "degraded" as const,
+            latencyMs: null,
+            blockNumber: null,
+          };
+        }
+      }),
+    );
+    const databaseOk = databaseOperational();
+    const degradedNetworks = networks.filter((network) => network.status !== "operational").length;
+    const overall = !databaseOk ? "outage" : degradedNetworks ? "degraded" : "operational";
+    const value = {
+      generatedAt: new Date().toISOString(),
+      overall,
+      uptimeSeconds: Math.floor((Date.now() - PROCESS_STARTED_AT) / 1_000),
+      components: {
+        api: { status: "operational" },
+        database: { status: databaseOk ? "operational" : "outage" },
+        scheduler: { status: "operational", tickIntervalMs: 100 },
+      },
+      networks,
+    };
+    statusCache = { value, expiresAt: Date.now() + 15_000 };
+    return value;
+  })();
+  try {
+    return await statusCache.pending;
+  } finally {
+    statusCache.pending = undefined;
+  }
+}
+
 export const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "2mb" }));
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on("finish", () => recordRequestMetric(req, res.statusCode, Date.now() - startedAt));
+  next();
+});
 
 if (IS_DEVELOPMENT) {
   app.use((req, res, next) => {
@@ -2496,7 +2645,89 @@ if (IS_DEVELOPMENT) {
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, chains: CHAINS.map(({ key, chainId }) => ({ key, chainId })) });
+  res.json({
+    ok: true,
+    uptimeSeconds: Math.floor((Date.now() - PROCESS_STARTED_AT) / 1_000),
+    chains: CHAINS.map(({ key, chainId }) => ({ key, chainId })),
+  });
+});
+
+app.get(
+  "/api/status",
+  asyncRoute(async (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=5");
+    res.json(await operationalStatus());
+  }),
+);
+
+app.get("/api/metrics", (_req, res) => {
+  let users = 0;
+  try {
+    const row = database().prepare("SELECT COUNT(*) AS count FROM users").get() as { count?: number };
+    users = Number(row?.count || 0);
+  } catch (error) {
+    logServerError("metrics-database", error);
+  }
+  const memory = process.memoryUsage();
+  const jobs = [...schedulerJobs.values()];
+  const transactions = [...broadcasts.values()];
+  const rpc = CHAINS.map((chain) => {
+    const health = rpcUrlsFor(chain).map((url) => rpcHealth.get(url)).filter(Boolean) as RpcHealth[];
+    const successes = health.reduce((sum, item) => sum + item.successes, 0);
+    const failures = health.reduce((sum, item) => sum + item.failures, 0);
+    const latencies = health
+      .map((item) => item.lastLatencyMs)
+      .filter((value): value is number => typeof value === "number");
+    return {
+      key: chain.key,
+      name: chain.name,
+      successes,
+      failures,
+      successRate: successes + failures ? Number(((successes / (successes + failures)) * 100).toFixed(2)) : null,
+      lastLatencyMs: latencies.length ? Math.min(...latencies) : null,
+    };
+  });
+  const topEndpoints = [...endpointMetrics.entries()]
+    .map(([path, metric]) => ({
+      path,
+      requests: metric.requests,
+      errors: metric.errors,
+      averageLatencyMs: metric.requests ? Math.round(metric.durationMs / metric.requests) : 0,
+    }))
+    .sort((left, right) => right.requests - left.requests)
+    .slice(0, 8);
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    generatedAt: new Date().toISOString(),
+    startedAt: new Date(PROCESS_STARTED_AT).toISOString(),
+    uptimeSeconds: Math.floor((Date.now() - PROCESS_STARTED_AT) / 1_000),
+    requests: {
+      total: totalApiRequests,
+      errors: totalApiErrors,
+      successRate: totalApiRequests
+        ? Number((((totalApiRequests - totalApiErrors) / totalApiRequests) * 100).toFixed(2))
+        : 100,
+      averageLatencyMs: totalApiRequests ? Math.round(totalApiDurationMs / totalApiRequests) : 0,
+    },
+    series: metricSeries(60),
+    topEndpoints,
+    rpc,
+    activity: {
+      users,
+      broadcasts: transactions.length,
+      confirmedTransactions: transactions.filter((transaction) => transaction.state === "confirmed").length,
+      revertedTransactions: transactions.filter((transaction) => transaction.state === "reverted").length,
+      scheduledJobs: jobs.length,
+      completedJobs: jobs.filter((job) => job.status === "completed").length,
+      failedJobs: jobs.filter((job) => job.status === "failed").length,
+    },
+    runtime: {
+      node: process.version,
+      rssBytes: memory.rss,
+      heapUsedBytes: memory.heapUsed,
+      heapTotalBytes: memory.heapTotal,
+    },
+  });
 });
 
 app.get("/api/auth/nonce", (req, res) => {
