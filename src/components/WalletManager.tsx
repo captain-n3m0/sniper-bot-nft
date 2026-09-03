@@ -1,6 +1,7 @@
-import React, { useRef, useState } from 'react';
-import { Wallet as WalletIcon, Plus, Trash2, Key, Shield, FileJson, Loader2, Upload } from 'lucide-react';
-import { Wallet } from 'ethers';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Wallet as WalletIcon, Plus, Trash2, Key, Shield, FileJson, Loader2, Upload, Coins, Send, CheckCircle2, ExternalLink } from 'lucide-react';
+import { Wallet, formatEther } from 'ethers';
+import { explorerTx, resolveChain } from '../lib/chains';
 
 declare global {
   interface Window {
@@ -19,6 +20,28 @@ interface WalletManagerProps {
   wallets: StoredWallet[];
   setWallets: React.Dispatch<React.SetStateAction<StoredWallet[]>>;
   addLog: (type: string, message: string, color: string) => void;
+  selectedChain: string;
+  rpcApiKey: string;
+  authToken: string;
+}
+
+interface FundingQuote {
+  chain: { key: string; nativeSymbol: string };
+  recipientCount: number;
+  amountEachWei: string;
+  transferTotalWei: string;
+  maximumNetworkFeeWei: string;
+  requiredTotalWei: string;
+  balanceWei: string;
+  maxFeeGwei: number;
+  sufficientBalance: boolean;
+}
+
+interface DispersalTransaction {
+  recipient: string;
+  accepted: boolean;
+  txHash?: string;
+  error?: string;
 }
 
 interface PlainWalletJson {
@@ -48,14 +71,98 @@ function isEncryptedKeystore(value: unknown) {
   return Number(record.version) === 3 && Boolean(record.crypto || record.Crypto);
 }
 
-export const WalletManager = ({ wallets, setWallets, addLog }: WalletManagerProps) => {
+export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, rpcApiKey, authToken }: WalletManagerProps) => {
   const [name, setName] = useState('');
   const [privateKey, setPrivateKey] = useState('');
   const [error, setError] = useState('');
   const [jsonFile, setJsonFile] = useState<File | null>(null);
   const [jsonPassword, setJsonPassword] = useState('');
   const [isImportingJson, setIsImportingJson] = useState(false);
+  const [sourceWalletId, setSourceWalletId] = useState('');
+  const [fundRecipients, setFundRecipients] = useState<Set<string>>(new Set());
+  const [amountEach, setAmountEach] = useState('0.01');
+  const [feeTier, setFeeTier] = useState('standard');
+  const [fundingQuote, setFundingQuote] = useState<FundingQuote | null>(null);
+  const [isQuoting, setIsQuoting] = useState(false);
+  const [isDispersing, setIsDispersing] = useState(false);
+  const [dispersalConfirmed, setDispersalConfirmed] = useState(false);
+  const [dispersalResults, setDispersalResults] = useState<DispersalTransaction[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sourceWallet = wallets.find((wallet) => wallet.id === sourceWalletId);
+  const nativeSymbol = resolveChain(selectedChain)?.nativeSymbol || 'ETH';
+  const recipientWallets = useMemo(
+    () => wallets.filter((wallet) => wallet.id !== sourceWalletId && fundRecipients.has(wallet.id)),
+    [wallets, sourceWalletId, fundRecipients],
+  );
+
+  useEffect(() => {
+    if (!wallets.some((wallet) => wallet.id === sourceWalletId)) {
+      setSourceWalletId(wallets[0]?.id || '');
+      setFundRecipients(new Set());
+      setFundingQuote(null);
+    }
+  }, [wallets, sourceWalletId]);
+
+  useEffect(() => {
+    if (!sourceWallet || !recipientWallets.length || !amountEach || Number(amountEach) <= 0 || !authToken) {
+      setFundingQuote(null);
+      return;
+    }
+    let active = true;
+    let controller: AbortController | null = null;
+    const fetchQuote = async () => {
+      controller?.abort();
+      controller = new AbortController();
+      setIsQuoting(true);
+      try {
+        const response = await fetch('/api/funds/estimate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            chain: selectedChain,
+            apiKey: rpcApiKey,
+            sourceAddress: sourceWallet.address,
+            recipients: recipientWallets.map((wallet) => wallet.address),
+            amountEach,
+            feeTier,
+          }),
+          signal: controller.signal,
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || 'Could not estimate dispersal');
+        if (active) {
+          setFundingQuote(data);
+          setError('');
+        }
+      } catch (quoteError) {
+        if (!active || (quoteError instanceof DOMException && quoteError.name === 'AbortError')) return;
+        setFundingQuote(null);
+        setError(quoteError instanceof Error ? quoteError.message : 'Could not estimate dispersal');
+      } finally {
+        if (active) setIsQuoting(false);
+      }
+    };
+    const initial = setTimeout(() => void fetchQuote(), 350);
+    const refresh = setInterval(() => void fetchQuote(), 6_000);
+    return () => {
+      active = false;
+      clearTimeout(initial);
+      clearInterval(refresh);
+      controller?.abort();
+    };
+  }, [sourceWallet?.address, recipientWallets.map((wallet) => wallet.address).join(','), amountEach, feeTier, selectedChain, rpcApiKey, authToken]);
+
+  const readableNative = (wei: string) => {
+    try {
+      const value = Number(formatEther(wei));
+      return `${value.toFixed(value >= 1 ? 5 : 7).replace(/0+$/, '').replace(/\.$/, '')} ${nativeSymbol}`;
+    } catch {
+      return `— ${nativeSymbol}`;
+    }
+  };
 
   const handleAddWallet = (e: React.FormEvent) => {
     e.preventDefault();
@@ -185,6 +292,67 @@ export const WalletManager = ({ wallets, setWallets, addLog }: WalletManagerProp
     }
   };
 
+  const handleDisperseFunds = async () => {
+    if (!sourceWallet || !recipientWallets.length) {
+      setError('Choose a source wallet and at least one recipient');
+      return;
+    }
+    if (!fundingQuote) {
+      setError('Wait for the live funding estimate before sending');
+      return;
+    }
+    if (!fundingQuote.sufficientBalance) {
+      setError('The source wallet does not have enough funds for transfers and maximum gas');
+      return;
+    }
+    if (!dispersalConfirmed) {
+      setError('Confirm the irreversible transfer before dispersing funds');
+      return;
+    }
+
+    setError('');
+    setIsDispersing(true);
+    setDispersalResults([]);
+    addLog(
+      'INFO',
+      `Dispersing ${amountEach} ${nativeSymbol} from ${sourceWallet.name} to ${recipientWallets.length} wallet(s) on ${selectedChain}.`,
+      'text-synapse-violet',
+    );
+    try {
+      const response = await fetch('/api/funds/disperse', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          chain: selectedChain,
+          apiKey: rpcApiKey,
+          sourcePrivateKey: sourceWallet.privateKey,
+          recipients: recipientWallets.map((wallet) => wallet.address),
+          amountEach,
+          feeTier,
+        }),
+      });
+      const data = await response.json();
+      const results: DispersalTransaction[] = Array.isArray(data.transactions) ? data.transactions : [];
+      setDispersalResults(results);
+      if (!response.ok || !data.success) throw new Error(data.error || 'No funding transaction was accepted');
+      addLog(
+        data.failed ? 'WARNING' : 'SUCCESS',
+        `Fund dispersal broadcast: ${data.accepted}/${data.recipientCount} transaction(s) accepted${data.failed ? `, ${data.failed} failed` : ''}.`,
+        data.failed ? 'text-yellow-500' : 'text-synapse-emerald',
+      );
+      setDispersalConfirmed(false);
+    } catch (sendError) {
+      const message = sendError instanceof Error ? sendError.message : 'Fund dispersal failed';
+      setError(message);
+      addLog('ERROR', `Fund dispersal failed: ${message}`, 'text-red-500');
+    } finally {
+      setIsDispersing(false);
+    }
+  };
+
   return (
     <div className="rounded-[24px] border border-white/5 bg-white/[0.02] p-8 backdrop-blur-[16px]">
       <div className="mb-8 flex items-center gap-3 border-b border-white/5 pb-4">
@@ -278,6 +446,152 @@ export const WalletManager = ({ wallets, setWallets, addLog }: WalletManagerProp
           <Plus size={16} /> Import Wallet
         </button>
       </form>
+
+      <div className="mb-8 rounded-2xl border border-synapse-emerald/20 bg-synapse-emerald/[0.04] p-5">
+        <div className="mb-5 flex items-center justify-between border-b border-white/5 pb-4">
+          <div className="flex items-center gap-2">
+            <Coins size={17} className="text-synapse-emerald" />
+            <span className="font-mono text-xs font-semibold uppercase tracking-widest text-synapse-emerald">Fund Disperser</span>
+          </div>
+          <span className="font-mono text-[10px] uppercase tracking-widest text-neutral-500">Native gas token • {selectedChain}</span>
+        </div>
+
+        {wallets.length < 2 ? (
+          <p className="text-xs leading-relaxed text-neutral-500">Import at least two execution wallets. One wallet supplies funds and the others receive them.</p>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-2 block font-mono text-[10px] uppercase tracking-widest text-neutral-500">Source wallet</label>
+                <select
+                  value={sourceWalletId}
+                  onChange={(event) => {
+                    setSourceWalletId(event.target.value);
+                    setFundRecipients(new Set());
+                    setDispersalResults([]);
+                    setDispersalConfirmed(false);
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-black/50 px-3 py-3 font-mono text-xs text-neutral-300 outline-none focus:border-synapse-emerald/50"
+                >
+                  {wallets.map((wallet) => <option key={wallet.id} value={wallet.id}>{wallet.name} • {wallet.address.slice(0, 8)}…</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="mb-2 block font-mono text-[10px] uppercase tracking-widest text-neutral-500">Amount per wallet ({nativeSymbol})</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.000000000000000001"
+                  value={amountEach}
+                  onChange={(event) => {
+                    setAmountEach(event.target.value);
+                    setDispersalConfirmed(false);
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-black/50 px-3 py-3 font-mono text-xs text-neutral-300 outline-none focus:border-synapse-emerald/50"
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-neutral-500">
+                <span>Recipient wallets ({recipientWallets.length})</span>
+                <div className="flex gap-3">
+                  <button type="button" className="text-synapse-cyan hover:underline" onClick={() => setFundRecipients(new Set(wallets.filter((wallet) => wallet.id !== sourceWalletId).map((wallet) => wallet.id)))}>All</button>
+                  <button type="button" className="hover:underline" onClick={() => setFundRecipients(new Set())}>Clear</button>
+                </div>
+              </div>
+              <div className="max-h-44 space-y-2 overflow-y-auto pr-1 custom-scrollbar">
+                {wallets.filter((wallet) => wallet.id !== sourceWalletId).map((wallet) => {
+                  const selected = fundRecipients.has(wallet.id);
+                  return (
+                    <button
+                      type="button"
+                      key={wallet.id}
+                      onClick={() => {
+                        const next = new Set(fundRecipients);
+                        if (selected) next.delete(wallet.id);
+                        else next.add(wallet.id);
+                        setFundRecipients(next);
+                        setDispersalConfirmed(false);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-xl border p-3 text-left transition-colors ${selected ? 'border-synapse-emerald/40 bg-synapse-emerald/10' : 'border-white/5 bg-black/30 hover:border-white/15'}`}
+                    >
+                      <span>
+                        <span className="block text-xs font-semibold text-white">{wallet.name}</span>
+                        <span className="font-mono text-[10px] text-neutral-500">{wallet.address.slice(0, 8)}…{wallet.address.slice(-6)}</span>
+                      </span>
+                      {selected && <CheckCircle2 size={15} className="text-synapse-emerald" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              {['slow', 'standard', 'fast'].map((tier) => (
+                <button
+                  type="button"
+                  key={tier}
+                  onClick={() => {
+                    setFeeTier(tier);
+                    setDispersalConfirmed(false);
+                  }}
+                  className={`rounded-lg border px-2 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors ${feeTier === tier ? 'border-synapse-cyan/40 bg-synapse-cyan/10 text-synapse-cyan' : 'border-white/5 text-neutral-500 hover:text-white'}`}
+                >
+                  {tier}
+                </button>
+              ))}
+            </div>
+
+            <div className="rounded-xl border border-white/5 bg-black/30 p-4">
+              {isQuoting && !fundingQuote ? (
+                <div className="flex items-center gap-2 text-xs text-neutral-500"><Loader2 size={13} className="animate-spin" /> Calculating live transfer cost…</div>
+              ) : fundingQuote ? (
+                <div className="space-y-2 font-mono text-xs">
+                  <div className="flex justify-between text-neutral-400"><span>Source balance</span><span className="text-white">{readableNative(fundingQuote.balanceWei)}</span></div>
+                  <div className="flex justify-between text-neutral-400"><span>Transfer total</span><span className="text-white">{readableNative(fundingQuote.transferTotalWei)}</span></div>
+                  <div className="flex justify-between text-neutral-400"><span>Maximum network fee</span><span className="text-white">{readableNative(fundingQuote.maximumNetworkFeeWei)}</span></div>
+                  <div className="flex justify-between border-t border-white/5 pt-2 text-neutral-400"><span>Total required</span><span className={fundingQuote.sufficientBalance ? 'text-synapse-emerald' : 'text-red-400'}>{readableNative(fundingQuote.requiredTotalWei)}</span></div>
+                  <div className="text-[10px] text-neutral-600">Live {feeTier} cap: {Number(fundingQuote.maxFeeGwei).toFixed(4)} Gwei • refreshes every 6s</div>
+                </div>
+              ) : (
+                <p className="text-xs text-neutral-500">Select recipients to calculate the required balance and live network fee.</p>
+              )}
+            </div>
+
+            <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-3 text-xs leading-relaxed text-yellow-200/70">
+              <input
+                type="checkbox"
+                checked={dispersalConfirmed}
+                onChange={(event) => setDispersalConfirmed(event.target.checked)}
+                className="mt-0.5 accent-emerald-500"
+              />
+              I confirm these are irreversible native-token transfers on {selectedChain}. The selected imported wallet will sign them.
+            </label>
+
+            <button
+              type="button"
+              onClick={() => void handleDisperseFunds()}
+              disabled={isDispersing || !fundingQuote || !fundingQuote.sufficientBalance || !dispersalConfirmed}
+              className="flex w-full items-center justify-center gap-2 rounded-xl border border-synapse-emerald/30 bg-synapse-emerald/10 px-4 py-3 font-mono text-sm font-semibold text-synapse-emerald transition-colors hover:bg-synapse-emerald/20 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isDispersing ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              {isDispersing ? 'SIGNING & BROADCASTING…' : `DISPERSE TO ${recipientWallets.length} WALLET${recipientWallets.length === 1 ? '' : 'S'}`}
+            </button>
+
+            {dispersalResults.length > 0 && (
+              <div className="space-y-2 border-t border-white/5 pt-4">
+                {dispersalResults.map((result) => (
+                  <div key={result.recipient} className="flex items-center justify-between gap-3 rounded-lg bg-black/30 px-3 py-2 font-mono text-[10px]">
+                    <span className={result.accepted ? 'text-synapse-emerald' : 'text-red-400'}>{result.recipient.slice(0, 8)}…{result.recipient.slice(-6)} • {result.accepted ? 'broadcasted' : result.error}</span>
+                    {result.txHash && <a href={explorerTx(selectedChain, result.txHash)} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-synapse-cyan hover:underline">TX <ExternalLink size={10} /></a>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div>
         <h3 className="mb-4 font-mono text-xs uppercase tracking-widest text-neutral-500">Stored Execution Wallets ({wallets.length})</h3>

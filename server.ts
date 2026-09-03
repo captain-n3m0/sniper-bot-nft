@@ -18,6 +18,7 @@ import {
   getAddress,
   isAddress,
   keccak256,
+  parseUnits,
   toQuantity,
 } from "ethers";
 import { generateNonce, SiweMessage } from "siwe";
@@ -521,6 +522,40 @@ function bigintValue(value: unknown, field: string, maximum?: bigint): bigint {
   } catch {
     throw new ApiError(400, `${field} must be a valid non-negative integer`);
   }
+}
+
+function nativeAmount(value: unknown, field: string): bigint {
+  const text = typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+  if (!text || !/^\d+(?:\.\d{1,18})?$/.test(text)) {
+    throw new ApiError(400, `${field} must be a positive native-token amount with up to 18 decimals`);
+  }
+  try {
+    const amount = parseUnits(text, 18);
+    if (amount <= 0n) throw new Error();
+    return amount;
+  } catch {
+    throw new ApiError(400, `${field} must be a positive native-token amount with up to 18 decimals`);
+  }
+}
+
+function recipientAddresses(value: unknown, sourceAddress: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ApiError(400, "At least one recipient address is required");
+  }
+  if (value.length > MAX_WALLETS) {
+    throw new ApiError(400, `A maximum of ${MAX_WALLETS} recipients is allowed`);
+  }
+  const sourceKey = sourceAddress.toLowerCase();
+  const recipients = new Map<string, string>();
+  for (const item of value) {
+    const address = requireAddress(
+      typeof item === "string" ? item : (item as Record<string, unknown>)?.address,
+      "recipient",
+    );
+    if (address.toLowerCase() !== sourceKey) recipients.set(address.toLowerCase(), address);
+  }
+  if (!recipients.size) throw new ApiError(400, "Recipients cannot contain only the source wallet");
+  return [...recipients.values()];
 }
 
 function modeFrom(body: Record<string, any>): "public" | "allowlist" {
@@ -2354,6 +2389,67 @@ function writeUserConfig(session: AuthenticatedSession, input: unknown) {
   return { config: decryptConfigValue(config), updatedAt: now };
 }
 
+const NATIVE_TRANSFER_GAS_LIMIT = 21_000n;
+
+async function buildFundingQuote(body: Record<string, any>, sourceAddress: string) {
+  const chain = requireChain(body.chain);
+  const endpoints = rpcUrlsFor(chain, body);
+  const recipients = recipientAddresses(body.recipients, sourceAddress);
+  const amountEach = nativeAmount(body.amountEach, "amountEach");
+  const snapshot = await withRpcFallback(endpoints, async (url) => {
+    const provider = providerFor(url, chain);
+    const [balance, nonce, rawFees] = await Promise.all([
+      provider.getBalance(sourceAddress, "pending"),
+      provider.getTransactionCount(sourceAddress, "pending"),
+      getFeeSnapshot(provider),
+    ]);
+    return { balance, nonce, fees: applyFeeTier(rawFees, body.feeTier || "standard") };
+  });
+  const transferTotal = amountEach * BigInt(recipients.length);
+  const maximumNetworkFee =
+    NATIVE_TRANSFER_GAS_LIMIT * snapshot.fees.maxFeePerGas * BigInt(recipients.length);
+  const requiredTotal = transferTotal + maximumNetworkFee;
+  return {
+    chain,
+    endpoints,
+    sourceAddress,
+    recipients,
+    amountEach,
+    balance: snapshot.balance,
+    nonce: snapshot.nonce,
+    fees: snapshot.fees,
+    transferTotal,
+    maximumNetworkFee,
+    requiredTotal,
+    sufficientBalance: snapshot.balance >= requiredTotal,
+  };
+}
+
+function publicFundingQuote(quote: Awaited<ReturnType<typeof buildFundingQuote>>) {
+  return {
+    chain: {
+      key: quote.chain.key,
+      chainId: quote.chain.chainId,
+      name: quote.chain.name,
+      nativeSymbol: quote.chain.nativeSymbol,
+    },
+    sourceAddress: quote.sourceAddress,
+    recipientCount: quote.recipients.length,
+    recipients: quote.recipients,
+    amountEachWei: quote.amountEach.toString(),
+    transferTotalWei: quote.transferTotal.toString(),
+    gasLimitPerTransfer: NATIVE_TRANSFER_GAS_LIMIT.toString(),
+    maxFeePerGas: quote.fees.maxFeePerGas.toString(),
+    maxPriorityFeePerGas: quote.fees.maxPriorityFeePerGas.toString(),
+    maxFeeGwei: gwei(quote.fees.maxFeePerGas),
+    maxPriorityFeeGwei: gwei(quote.fees.maxPriorityFeePerGas),
+    maximumNetworkFeeWei: quote.maximumNetworkFee.toString(),
+    requiredTotalWei: quote.requiredTotal.toString(),
+    balanceWei: quote.balance.toString(),
+    sufficientBalance: quote.sufficientBalance,
+  };
+}
+
 const authCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [nonce, record] of authNonces) {
@@ -2465,6 +2561,76 @@ app.put(
     const config = writeUserConfig(session, req.body?.config ?? {});
     res.setHeader("Cache-Control", "no-store");
     res.json({ success: true, address: session.address, ...config });
+  }),
+);
+
+app.post(
+  "/api/funds/estimate",
+  asyncRoute(async (req, res) => {
+    requireSession(req);
+    const body = (req.body || {}) as Record<string, any>;
+    const sourceAddress = requireAddress(body.sourceAddress, "sourceAddress");
+    const quote = await buildFundingQuote(body, sourceAddress);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, ...publicFundingQuote(quote) });
+  }),
+);
+
+app.post(
+  "/api/funds/disperse",
+  asyncRoute(async (req, res) => {
+    requireSession(req);
+    const body = (req.body || {}) as Record<string, any>;
+    const sourceWallet = walletFromPrivateKey(body.sourcePrivateKey);
+    const quote = await buildFundingQuote(body, sourceWallet.address);
+    if (!quote.sufficientBalance) {
+      throw new ApiError(400, "Source wallet balance is below the transfer total plus maximum network fees", {
+        balanceWei: quote.balance.toString(),
+        requiredTotalWei: quote.requiredTotal.toString(),
+      });
+    }
+
+    const signedTransactions = await Promise.all(
+      quote.recipients.map((to, index) =>
+        sourceWallet.signTransaction({
+          to,
+          value: quote.amountEach,
+          chainId: quote.chain.chainId,
+          type: 2,
+          nonce: quote.nonce + index,
+          gasLimit: NATIVE_TRANSFER_GAS_LIMIT,
+          maxFeePerGas: quote.fees.maxFeePerGas,
+          maxPriorityFeePerGas: quote.fees.maxPriorityFeePerGas,
+        }),
+      ),
+    );
+    const settled = await Promise.allSettled(
+      signedTransactions.map((signedTx) =>
+        broadcastSignedTransaction(signedTx, quote.chain, quote.endpoints),
+      ),
+    );
+    const transactions = settled.map((result, index) =>
+      result.status === "fulfilled"
+        ? {
+            recipient: quote.recipients[index],
+            accepted: true,
+            txHash: result.value.txHash,
+            statusUrl: result.value.statusUrl,
+          }
+        : {
+            recipient: quote.recipients[index],
+            accepted: false,
+            error: errorMessage(result.reason),
+          },
+    );
+    const accepted = transactions.filter((item) => item.accepted).length;
+    res.status(accepted ? 200 : 502).json({
+      success: accepted > 0,
+      accepted,
+      failed: transactions.length - accepted,
+      ...publicFundingQuote(quote),
+      transactions,
+    });
   }),
 );
 

@@ -9,6 +9,7 @@ import { DropStages } from '../components/DropStages';
 import { ScheduledMinting } from '../components/ScheduledMinting';
 import { GasEstimator } from '../components/GasEstimator';
 import { WalletLogin } from '../components/WalletLogin';
+import { LiveTransactionFee } from '../components/LiveTransactionFee';
 import { resolveChain } from '../lib/chains';
 
 const MAX_SNIPER_WORKERS = 24;
@@ -81,6 +82,7 @@ export const Dashboard = () => {
   const [wallets, setWallets] = useState<StoredWallet[]>([]);
   const [selectedChain, setSelectedChain] = useState<string>('ethereum');
   const [selectedSniperWallets, setSelectedSniperWallets] = useState<Set<string>>(new Set());
+  const [mintFeeBasis, setMintFeeBasis] = useState({ gasLimit: '350000', valueWei: null as string | null, exact: false });
 
   const [form, setForm] = useState<SniperFormState>(DEFAULT_SNIPER_FORM);
   const [configLoaded, setConfigLoaded] = useState(false);
@@ -248,7 +250,8 @@ export const Dashboard = () => {
           salt: form.salt,
           signature: form.signature,
           slug: form.openSeaSlug || undefined,
-          openseaApiKey: form.openSeaApiKey || undefined
+          openseaApiKey: form.openSeaApiKey || undefined,
+          feeTier: 'fast'
         };
 
         const prepareRes = await fetch('/api/prepare-mint', {
@@ -261,6 +264,21 @@ export const Dashboard = () => {
         if (!prepareRes.ok || !prepared.success) {
           throw new Error(prepared.error || 'Failed to prepare mint transaction');
         }
+
+        setMintFeeBasis(current => {
+          const nextGasLimit = String(prepared.transaction?.gasLimit || current.gasLimit || '350000');
+          let gasLimit = nextGasLimit;
+          try {
+            gasLimit = BigInt(nextGasLimit) > BigInt(current.gasLimit) ? nextGasLimit : current.gasLimit;
+          } catch {
+            gasLimit = current.gasLimit;
+          }
+          return {
+            gasLimit,
+            valueWei: String(prepared.plan?.value ?? prepared.transaction?.value ?? current.valueWei ?? '0'),
+            exact: Boolean(prepared.transaction?.gasLimit),
+          };
+        });
 
         addLog('SUCCESS', `[worker ${workerId}] Payload ready for ${walletLabel}. Value: ${prepared.plan.value} wei`, 'text-synapse-emerald');
         if (prepared.plan.source === 'opensea-mint-action') {
@@ -369,7 +387,13 @@ export const Dashboard = () => {
           <span className="text-xs font-mono uppercase tracking-widest text-neutral-500 hidden md:block">Cloud Terminal</span>
         </div>
         <div className="flex items-center gap-6">
-          <ChainSelector selectedChain={selectedChain} setSelectedChain={setSelectedChain} />
+          <ChainSelector
+            selectedChain={selectedChain}
+            setSelectedChain={(chain) => {
+              setSelectedChain(chain);
+              setMintFeeBasis({ gasLimit: '350000', valueWei: null, exact: false });
+            }}
+          />
           <Link to="/" className="flex items-center gap-2 text-xs font-medium uppercase tracking-widest text-neutral-400 hover:text-white transition-colors">
             <ArrowLeft size={14} /> Exit
           </Link>
@@ -429,11 +453,14 @@ export const Dashboard = () => {
                   <input 
                     type="text" 
                     value={form.contractAddress}
-                    onChange={(e) => setForm({
-                      ...form,
-                      contractAddress: e.target.value,
-                      openSeaSlug: ''
-                    })}
+                    onChange={(e) => {
+                      setForm({
+                        ...form,
+                        contractAddress: e.target.value,
+                        openSeaSlug: ''
+                      });
+                      setMintFeeBasis({ gasLimit: '350000', valueWei: null, exact: false });
+                    }}
                     className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-violet/50 focus:bg-white/5 transition-colors"
                     placeholder="0x... or opensea-slug"
                     required
@@ -446,7 +473,10 @@ export const Dashboard = () => {
                     type="number" 
                     min="1"
                     value={form.quantity}
-                    onChange={(e) => setForm({...form, quantity: e.target.value})}
+                    onChange={(e) => {
+                      setForm({...form, quantity: e.target.value});
+                      setMintFeeBasis({ gasLimit: '350000', valueWei: null, exact: false });
+                    }}
                     className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-emerald/50 focus:bg-white/5 transition-colors"
                     required
                   />
@@ -540,6 +570,14 @@ export const Dashboard = () => {
                   <p className="mt-2 text-xs text-neutral-500">If no wallets are selected, the sniper will only generate and return the calldata.</p>
                 </div>
 
+                <LiveTransactionFee
+                  selectedChain={selectedChain}
+                  gasLimit={mintFeeBasis.gasLimit}
+                  valueWei={mintFeeBasis.valueWei}
+                  exactGasLimit={mintFeeBasis.exact}
+                  walletCount={selectedSniperWallets.size}
+                />
+
                 <div className="pt-6">
                   <button 
                     type="submit"
@@ -567,7 +605,14 @@ export const Dashboard = () => {
             )}
 
             {activeTab === 'wallets' && (
-              <WalletManager wallets={wallets} setWallets={setWallets} addLog={addLog} />
+              <WalletManager
+                wallets={wallets}
+                setWallets={setWallets}
+                addLog={addLog}
+                selectedChain={selectedChain}
+                rpcApiKey={form.apiKey}
+                authToken={authToken}
+              />
             )}
 
             {activeTab === 'stages' && (
@@ -578,6 +623,13 @@ export const Dashboard = () => {
                 onDetectedChain={setSelectedChain}
                 onSelectStageForSniper={(contractAddress, stage, context) => {
                   setSelectedChain(context.chain);
+                  let selectedStageValue: string | null = null;
+                  try {
+                    selectedStageValue = BigInt(stage.raw?.price || 0).toString();
+                  } catch {
+                    selectedStageValue = null;
+                  }
+                  setMintFeeBasis({ gasLimit: '350000', valueWei: selectedStageValue, exact: false });
                   setForm(prev => ({
                     ...prev,
                     contractAddress,
