@@ -8,6 +8,7 @@ import { Landing } from './pages/Landing';
 import { Dashboard } from './pages/Dashboard';
 import { Metrics } from './pages/Metrics';
 import { Status } from './pages/Status';
+import { Documentation } from './pages/Documentation';
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/metrics" element={<Metrics />} />
         <Route path="/status" element={<Status />} />
+        <Route path="/docs" element={<Documentation />} />
       </Routes>
     </BrowserRouter>
   );

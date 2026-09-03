@@ -36,9 +36,9 @@ export const Hero = () => {
           <Link to="/dashboard">
             <ShinyButton>LAUNCH DASHBOARD</ShinyButton>
           </Link>
-          <a href="#setup" className="text-sm font-semibold uppercase tracking-widest text-neutral-400 transition-colors hover:text-white">
+          <Link to="/docs" className="text-sm font-semibold uppercase tracking-widest text-neutral-400 transition-colors hover:text-white">
             View Documentation
-          </a>
+          </Link>
         </motion.div>
       </motion.div>
     </section>
