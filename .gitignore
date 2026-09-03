@@ -9,3 +9,6 @@ coverage/
 .sepolia-test-deployer.json
 .opensea-key-cache.json
 .opensea-key-cache.json.*.tmp
+.lastlap-mintgrid.sqlite
+.lastlap-mintgrid.sqlite-shm
+.lastlap-mintgrid.sqlite-wal

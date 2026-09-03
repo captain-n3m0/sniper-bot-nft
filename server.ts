@@ -1,8 +1,11 @@
 import "dotenv/config";
 
 import crypto from "node:crypto";
+import { chmodSync, mkdirSync } from "node:fs";
 import { chmod, readFile, rename, writeFile } from "node:fs/promises";
+import type { Server as HttpServer } from "node:http";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import express, { type NextFunction, type Request, type Response } from "express";
 import {
   FetchRequest,
@@ -37,6 +40,10 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36 SeaDropSniper/1.0";
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const IS_DEVELOPMENT = !IS_PRODUCTION && process.env.NODE_ENV !== "test";
+const DATABASE_PATH = path.resolve(
+  process.env.DATABASE_PATH || (IS_PRODUCTION ? "/var/lib/lastlap-mintgrid/app.sqlite" : ".lastlap-mintgrid.sqlite"),
+);
+const MAX_USER_CONFIG_BYTES = 64 * 1024;
 
 interface ChainConfig {
   key: string;
@@ -2110,6 +2117,13 @@ interface NonceRecord {
 const authNonces = new Map<string, NonceRecord>();
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 
+interface AuthenticatedSession {
+  address: string;
+  addressKey: string;
+  chainId: number;
+  jti: string;
+}
+
 function issueSessionToken(address: string, chainId: number) {
   const now = Math.floor(Date.now() / 1000);
   const payload = Buffer.from(
@@ -2117,6 +2131,227 @@ function issueSessionToken(address: string, chainId: number) {
   ).toString("base64url");
   const signature = crypto.createHmac("sha256", sessionSecret).update(payload).digest("base64url");
   return { token: `${payload}.${signature}`, expiresAt: new Date((now + 86_400) * 1000).toISOString() };
+}
+
+function verifySessionToken(token: unknown): AuthenticatedSession {
+  if (typeof token !== "string" || !token.trim()) throw new ApiError(401, "Authentication token is required");
+  const [payload, signature, extra] = token.trim().split(".");
+  if (!payload || !signature || extra !== undefined) throw new ApiError(401, "Authentication token is invalid");
+  const expected = crypto.createHmac("sha256", sessionSecret).update(payload).digest("base64url");
+  const supplied = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (supplied.length !== expectedBuffer.length || !crypto.timingSafeEqual(supplied, expectedBuffer)) {
+    throw new ApiError(401, "Authentication token is invalid");
+  }
+  let claims: any;
+  try {
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    throw new ApiError(401, "Authentication token payload is invalid");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(Number(claims.exp)) || Number(claims.exp) <= now) {
+    throw new ApiError(401, "Authentication token has expired");
+  }
+  const address = requireAddress(claims.sub, "session.sub");
+  const chainId = Number(claims.chainId);
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) throw new ApiError(401, "Authentication token chain is invalid");
+  return {
+    address,
+    addressKey: address.toLowerCase(),
+    chainId,
+    jti: typeof claims.jti === "string" ? claims.jti : "",
+  };
+}
+
+function requireSession(req: Request): AuthenticatedSession {
+  const authorization = req.get("authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  return verifySessionToken(bearer || req.get("x-session-token"));
+}
+
+type JsonConfig = null | boolean | number | string | JsonConfig[] | { [key: string]: JsonConfig };
+
+const BLOCKED_CONFIG_KEY =
+  /^(?:privateKey|privateKeys|wallet|wallets|mnemonic|seed|seedPhrase|signedTx|signedTransaction|signature|salt|authToken|token|session|password|secret)$/i;
+const ENCRYPTED_CONFIG_KEY = /api.?key/i;
+
+let userDatabase: DatabaseSync | undefined;
+let missingConfigEncryptionWarningShown = false;
+
+function configEncryptionKey(): Buffer | undefined {
+  const secret = String(process.env.CONFIG_ENCRYPTION_KEY || process.env.SESSION_SECRET || "").trim();
+  return secret ? crypto.createHash("sha256").update(secret).digest() : undefined;
+}
+
+function encryptConfigSecret(value: string): JsonConfig {
+  if (!value) return "";
+  const key = configEncryptionKey();
+  if (!key) {
+    if (IS_DEVELOPMENT && !missingConfigEncryptionWarningShown) {
+      missingConfigEncryptionWarningShown = true;
+      logServerError(
+        "config-encryption",
+        new Error("CONFIG_ENCRYPTION_KEY or SESSION_SECRET is required to persist API-key config fields"),
+      );
+    }
+    return "";
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    __lastlapEncrypted: "v1",
+    iv: iv.toString("base64url"),
+    tag: tag.toString("base64url"),
+    data: encrypted.toString("base64url"),
+  };
+}
+
+function decryptConfigSecret(value: Record<string, JsonConfig>): string {
+  const key = configEncryptionKey();
+  if (!key) return "";
+  try {
+    const iv = Buffer.from(String(value.iv || ""), "base64url");
+    const tag = Buffer.from(String(value.tag || ""), "base64url");
+    const data = Buffer.from(String(value.data || ""), "base64url");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
+  } catch (error) {
+    if (IS_DEVELOPMENT) logServerError("config-decrypt", error);
+    return "";
+  }
+}
+
+function sanitizeConfigValue(value: unknown, key = "", depth = 0): JsonConfig | undefined {
+  if (BLOCKED_CONFIG_KEY.test(key)) return undefined;
+  if (ENCRYPTED_CONFIG_KEY.test(key)) {
+    return typeof value === "string" ? encryptConfigSecret(value.slice(0, 4096)) : "";
+  }
+  if (value === null) return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string") return value.slice(0, 4096);
+  if (Array.isArray(value)) {
+    if (depth >= 6) return [];
+    return value.slice(0, 100).map((item) => sanitizeConfigValue(item, "", depth + 1) ?? null);
+  }
+  if (value && typeof value === "object") {
+    if (depth >= 6) return {};
+    const output: Record<string, JsonConfig> = {};
+    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>).slice(0, 100)) {
+      const cleaned = sanitizeConfigValue(childValue, childKey, depth + 1);
+      if (cleaned !== undefined) output[childKey] = cleaned;
+    }
+    return output;
+  }
+  return undefined;
+}
+
+function decryptConfigValue(value: JsonConfig): JsonConfig {
+  if (Array.isArray(value)) return value.map(decryptConfigValue);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, JsonConfig>;
+    if (record.__lastlapEncrypted === "v1") return decryptConfigSecret(record);
+    const output: Record<string, JsonConfig> = {};
+    for (const [key, item] of Object.entries(record)) output[key] = decryptConfigValue(item);
+    return output;
+  }
+  return value;
+}
+
+function database(): DatabaseSync {
+  if (userDatabase) return userDatabase;
+  mkdirSync(path.dirname(DATABASE_PATH), { recursive: true, mode: 0o700 });
+  userDatabase = new DatabaseSync(DATABASE_PATH);
+  userDatabase.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA busy_timeout = 5000;
+    PRAGMA foreign_keys = ON;
+
+    CREATE TABLE IF NOT EXISTS users (
+      address_key TEXT PRIMARY KEY,
+      wallet_address TEXT NOT NULL,
+      last_chain_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_login_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_configs (
+      address_key TEXT PRIMARY KEY REFERENCES users(address_key) ON DELETE CASCADE,
+      config_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  try {
+    chmodSync(DATABASE_PATH, 0o600);
+  } catch {
+    // chmod can fail on filesystems that do not support POSIX modes.
+  }
+  return userDatabase;
+}
+
+function upsertUser(address: string, chainId: number) {
+  const normalized = requireAddress(address, "address");
+  const now = new Date().toISOString();
+  database()
+    .prepare(
+      `
+      INSERT INTO users (address_key, wallet_address, last_chain_id, created_at, updated_at, last_login_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(address_key) DO UPDATE SET
+        wallet_address = excluded.wallet_address,
+        last_chain_id = excluded.last_chain_id,
+        updated_at = excluded.updated_at,
+        last_login_at = excluded.last_login_at
+    `,
+    )
+    .run(normalized.toLowerCase(), normalized, chainId, now, now, now);
+}
+
+function readUserConfig(session: AuthenticatedSession) {
+  upsertUser(session.address, session.chainId);
+  const row = database()
+    .prepare("SELECT config_json, updated_at FROM user_configs WHERE address_key = ?")
+    .get(session.addressKey) as { config_json?: string; updated_at?: string } | undefined;
+  if (!row?.config_json) return { config: {}, updatedAt: null };
+  try {
+    return {
+      config: decryptConfigValue(JSON.parse(row.config_json) as JsonConfig),
+      updatedAt: row.updated_at || null,
+    };
+  } catch (error) {
+    logServerError("config-read", error, { address: session.address });
+    return { config: {}, updatedAt: null };
+  }
+}
+
+function writeUserConfig(session: AuthenticatedSession, input: unknown) {
+  upsertUser(session.address, session.chainId);
+  const sanitized = sanitizeConfigValue(input);
+  const config = sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) ? sanitized : {};
+  const serialized = JSON.stringify(config);
+  if (Buffer.byteLength(serialized, "utf8") > MAX_USER_CONFIG_BYTES) {
+    throw new ApiError(413, "User config is too large");
+  }
+  const now = new Date().toISOString();
+  database()
+    .prepare(
+      `
+      INSERT INTO user_configs (address_key, config_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(address_key) DO UPDATE SET
+        config_json = excluded.config_json,
+        updated_at = excluded.updated_at
+    `,
+    )
+    .run(session.addressKey, serialized, now, now);
+  return { config: decryptConfigValue(config), updatedAt: now };
 }
 
 const authCleanupInterval = setInterval(() => {
@@ -2205,9 +2440,31 @@ app.post(
       throw new ApiError(401, verification.error?.type || "SIWE signature verification failed");
     }
     authNonces.delete(message.nonce);
-    const session = issueSessionToken(getAddress(message.address), message.chainId);
+    const verifiedAddress = getAddress(message.address);
+    upsertUser(verifiedAddress, message.chainId);
+    const session = issueSessionToken(verifiedAddress, message.chainId);
     res.setHeader("Cache-Control", "no-store");
-    res.json({ success: true, address: getAddress(message.address), ...session });
+    res.json({ success: true, address: verifiedAddress, ...session });
+  }),
+);
+
+app.get(
+  "/api/user/config",
+  asyncRoute(async (req, res) => {
+    const session = requireSession(req);
+    const config = readUserConfig(session);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, address: session.address, ...config });
+  }),
+);
+
+app.put(
+  "/api/user/config",
+  asyncRoute(async (req, res) => {
+    const session = requireSession(req);
+    const config = writeUserConfig(session, req.body?.config ?? {});
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, address: session.address, ...config });
   }),
 );
 
@@ -2963,17 +3220,22 @@ async function installFrontend() {
 }
 
 let serverStarted = false;
+let activeHttpServer: HttpServer | undefined;
 export async function startServer() {
   if (serverStarted) return;
   serverStarted = true;
   installProcessErrorLogging();
+  database();
   await installFrontend();
   await new Promise<void>((resolve, reject) => {
-    const server = app.listen(PORT, HOST);
-    const onError = (error: Error) => reject(error);
-    server.once("error", onError);
-    server.once("listening", () => {
-      server.off("error", onError);
+    activeHttpServer = app.listen(PORT, HOST);
+    const onError = (error: Error) => {
+      activeHttpServer = undefined;
+      reject(error);
+    };
+    activeHttpServer.once("error", onError);
+    activeHttpServer.once("listening", () => {
+      activeHttpServer?.off("error", onError);
       console.log(`NFT sniper server listening on http://${HOST}:${PORT}`);
       resolve();
     });

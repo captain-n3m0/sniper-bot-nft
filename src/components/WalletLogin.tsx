@@ -3,7 +3,7 @@ import { Shield, Fingerprint, Loader2, AlertCircle, RefreshCw } from 'lucide-rea
 import { BrowserProvider } from 'ethers';
 
 interface WalletLoginProps {
-  onLogin: (address: string) => void;
+  onLogin: (address: string, token: string) => void;
 }
 
 interface InjectedProvider {
@@ -157,8 +157,10 @@ export const WalletLogin = ({ onLogin }: WalletLoginProps) => {
 
       if (verifyData.success) {
         // Store authentication state only. Execution wallets are imported separately.
+        const verifiedAddress = verifyData.address || address;
         localStorage.setItem('auth_token', verifyData.token);
-        onLogin(address);
+        localStorage.setItem('auth_address', verifiedAddress);
+        onLogin(verifiedAddress, verifyData.token);
       }
 
     } catch (err: any) {

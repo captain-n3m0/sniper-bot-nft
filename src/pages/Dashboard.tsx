@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
 import { Terminal, Shield, Zap, Play, CheckCircle2, XCircle, ArrowLeft, ShieldCheck } from 'lucide-react';
@@ -9,26 +9,84 @@ import { DropStages } from '../components/DropStages';
 import { ScheduledMinting } from '../components/ScheduledMinting';
 import { GasEstimator } from '../components/GasEstimator';
 import { WalletLogin } from '../components/WalletLogin';
+import { resolveChain } from '../lib/chains';
+
+const MAX_SNIPER_WORKERS = 24;
+const CONFIG_SAVE_DELAY_MS = 700;
+
+type DashboardTab = 'sniper' | 'wallets' | 'stages' | 'scheduler' | 'gas';
+
+interface SniperFormState {
+  apiKey: string;
+  contractAddress: string;
+  quantity: string;
+  isAllowlist: boolean;
+  mintParams: string;
+  salt: string;
+  signature: string;
+  openSeaSlug: string;
+  openSeaApiKey: string;
+  parallelWorkers: string;
+}
+
+const DEFAULT_SNIPER_FORM: SniperFormState = {
+  apiKey: '',
+  contractAddress: '',
+  quantity: '1',
+  isAllowlist: false,
+  mintParams: '',
+  salt: '',
+  signature: '',
+  openSeaSlug: '',
+  openSeaApiKey: '',
+  parallelWorkers: '8'
+};
+
+const shortAddress = (address: string) => `${address.slice(0, 6)}...${address.slice(-4)}`;
+
+const sniperWorkerCount = (value: string, walletCount: number) => {
+  const requested = Math.floor(Number(value));
+  if (!Number.isFinite(requested) || requested < 1) return 1;
+  return Math.max(1, Math.min(requested, walletCount, MAX_SNIPER_WORKERS));
+};
+
+const textConfig = (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback);
+const chainConfig = (value: unknown) => resolveChain(textConfig(value))?.key || 'ethereum';
+const tabConfig = (value: unknown): DashboardTab =>
+  ['sniper', 'wallets', 'stages', 'scheduler', 'gas'].includes(String(value))
+    ? (value as DashboardTab)
+    : 'sniper';
+
+const persistedConfig = (selectedChain: string, form: SniperFormState, activeTab: DashboardTab) => ({
+  version: 1,
+  activeTab,
+  selectedChain,
+  sniper: {
+    apiKey: form.apiKey,
+    contractAddress: form.contractAddress,
+    quantity: form.quantity,
+    isAllowlist: form.isAllowlist,
+    openSeaSlug: form.openSeaSlug,
+    openSeaApiKey: form.openSeaApiKey,
+    parallelWorkers: form.parallelWorkers
+  }
+});
 
 export const Dashboard = () => {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('auth_token') || '');
+  const [authAddress, setAuthAddress] = useState(() => localStorage.getItem('auth_address') || '');
+  const [isAuthenticated, setIsAuthenticated] = useState(() => Boolean(localStorage.getItem('auth_token') && localStorage.getItem('auth_address')));
 
-  const [activeTab, setActiveTab] = useState<'sniper' | 'wallets' | 'stages' | 'scheduler' | 'gas'>('sniper');
+  const [activeTab, setActiveTab] = useState<DashboardTab>('sniper');
   const [wallets, setWallets] = useState<StoredWallet[]>([]);
   const [selectedChain, setSelectedChain] = useState<string>('ethereum');
   const [selectedSniperWallets, setSelectedSniperWallets] = useState<Set<string>>(new Set());
 
-  const [form, setForm] = useState({
-    apiKey: '',
-    contractAddress: '',
-    quantity: '1',
-    isAllowlist: false,
-    mintParams: '',
-    salt: '',
-    signature: '',
-    openSeaSlug: '',
-    openSeaApiKey: ''
-  });
+  const [form, setForm] = useState<SniperFormState>(DEFAULT_SNIPER_FORM);
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const lastSavedConfig = useRef('');
+  const configSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const configSaveErrorLogged = useRef(false);
 
   const [logs, setLogs] = useState<{ time: string; type: string; message: string; color: string }[]>([
     { time: new Date().toLocaleTimeString(), type: 'SYSTEM', message: 'Terminal initialized. Ready for instructions.', color: 'text-neutral-500' }
@@ -38,6 +96,111 @@ export const Dashboard = () => {
   const addLog = (type: string, message: string, color: string) => {
     setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type, message, color }]);
   };
+
+  const clearAuth = () => {
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_address');
+    setAuthToken('');
+    setAuthAddress('');
+    setConfigLoaded(false);
+    setIsAuthenticated(false);
+  };
+
+  useEffect(() => {
+    if (!isAuthenticated || !authToken) {
+      setConfigLoaded(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadConfig = async () => {
+      try {
+        const response = await fetch('/api/user/config', {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+          if (response.status === 401) clearAuth();
+          throw new Error(data.error || 'Could not load saved config');
+        }
+        if (cancelled) return;
+
+        const remoteConfig = data.config && typeof data.config === 'object' ? data.config : {};
+        const remoteSniper = remoteConfig.sniper && typeof remoteConfig.sniper === 'object' ? remoteConfig.sniper : {};
+        const nextForm: SniperFormState = {
+          ...DEFAULT_SNIPER_FORM,
+          apiKey: textConfig(remoteSniper.apiKey),
+          contractAddress: textConfig(remoteSniper.contractAddress),
+          quantity: textConfig(remoteSniper.quantity, DEFAULT_SNIPER_FORM.quantity),
+          isAllowlist: typeof remoteSniper.isAllowlist === 'boolean' ? remoteSniper.isAllowlist : false,
+          openSeaSlug: textConfig(remoteSniper.openSeaSlug),
+          openSeaApiKey: textConfig(remoteSniper.openSeaApiKey),
+          parallelWorkers: textConfig(remoteSniper.parallelWorkers, DEFAULT_SNIPER_FORM.parallelWorkers)
+        };
+        const nextChain = chainConfig(remoteConfig.selectedChain);
+        const nextTab = tabConfig(remoteConfig.activeTab);
+
+        setSelectedChain(nextChain);
+        setActiveTab(nextTab);
+        setForm(nextForm);
+        lastSavedConfig.current = JSON.stringify(persistedConfig(nextChain, nextForm, nextTab));
+        setConfigLoaded(true);
+        addLog(
+          'SYSTEM',
+          data.updatedAt ? `Loaded saved config for ${data.address}.` : `No saved config yet for ${data.address}; auto-save is ready.`,
+          'text-synapse-emerald'
+        );
+      } catch (err: any) {
+        if (cancelled) return;
+        setConfigLoaded(true);
+        addLog('ERROR', `Saved config sync failed: ${err.message || 'Unknown error'}`, 'text-red-500');
+      }
+    };
+
+    void loadConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, authToken]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !authToken || !configLoaded) return;
+    const nextConfig = persistedConfig(selectedChain, form, activeTab);
+    const serialized = JSON.stringify(nextConfig);
+    if (serialized === lastSavedConfig.current) return;
+
+    if (configSaveTimer.current) clearTimeout(configSaveTimer.current);
+    configSaveTimer.current = setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch('/api/user/config', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authToken}`
+            },
+            body: JSON.stringify({ config: nextConfig })
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success) {
+            if (response.status === 401) clearAuth();
+            throw new Error(data.error || 'Could not save config');
+          }
+          lastSavedConfig.current = serialized;
+          configSaveErrorLogged.current = false;
+        } catch (err: any) {
+          if (!configSaveErrorLogged.current) {
+            configSaveErrorLogged.current = true;
+            addLog('ERROR', `Could not save config: ${err.message || 'Unknown error'}`, 'text-red-500');
+          }
+        }
+      })();
+    }, CONFIG_SAVE_DELAY_MS);
+
+    return () => {
+      if (configSaveTimer.current) clearTimeout(configSaveTimer.current);
+    };
+  }, [isAuthenticated, authToken, configLoaded, selectedChain, form, activeTab]);
 
   const handleSnipe = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -65,18 +228,15 @@ export const Dashboard = () => {
 
       addLog('INFO', 'Generating optimized calldata...', 'text-synapse-violet');
       
-      const activeWallets = Array.from(selectedSniperWallets).map(id => wallets.find(w => w.id === id)).filter(Boolean);
+      const activeWallets = Array.from(selectedSniperWallets)
+        .map(id => wallets.find(w => w.id === id))
+        .filter((wallet): wallet is StoredWallet => Boolean(wallet));
 
-      if (activeWallets.length === 0) {
-        // Dry run mode
-        activeWallets.push(undefined);
-      }
-
-      for (const wallet of activeWallets) {
+      const prepareAndBlast = async (wallet: StoredWallet | undefined, workerId = 1) => {
+        const walletLabel = wallet ? `${wallet.name} (${shortAddress(wallet.address)})` : 'dry-run wallet';
         if (wallet) {
-          addLog('INFO', `Executing for wallet: ${wallet.name}`, 'text-synapse-cyan');
+          addLog('INFO', `[worker ${workerId}] Preparing ${walletLabel}`, 'text-synapse-cyan');
         }
-
         const payload = {
           chain: selectedChain,
           apiKey: form.apiKey,
@@ -102,17 +262,17 @@ export const Dashboard = () => {
           throw new Error(prepared.error || 'Failed to prepare mint transaction');
         }
 
-        addLog('SUCCESS', `Payload generated! Value: ${prepared.plan.value} wei`, 'text-synapse-emerald');
+        addLog('SUCCESS', `[worker ${workerId}] Payload ready for ${walletLabel}. Value: ${prepared.plan.value} wei`, 'text-synapse-emerald');
         if (prepared.plan.source === 'opensea-mint-action') {
           addLog(
             'NETWORK',
-            `Using OpenSea's exact ${prepared.plan.decoded?.method || 'mint'} action for this wallet.`,
+            `[worker ${workerId}] Using OpenSea's exact ${prepared.plan.decoded?.method || 'mint'} action for ${walletLabel}.`,
             'text-synapse-cyan',
           );
         }
         if (!wallet) {
           addLog('WARNING', 'Dry run complete. Select a wallet to broadcast.', 'text-yellow-500');
-          continue;
+          return { ok: true, dryRun: true };
         }
         if (prepared.simulation && !prepared.simulation.ok) {
           throw new Error(`Simulation failed: ${prepared.simulation.reason}`);
@@ -132,7 +292,52 @@ export const Dashboard = () => {
         if (!blastRes.ok || !blasted.success) {
           throw new Error(blasted.error || 'Failed to broadcast mint transaction');
         }
-        addLog('SUCCESS', `Transaction broadcasted! Hash: ${blasted.txHash}`, 'text-synapse-emerald');
+        addLog('SUCCESS', `[worker ${workerId}] ${wallet.name} broadcasted. Hash: ${blasted.txHash}`, 'text-synapse-emerald');
+        return { ok: true, wallet, txHash: blasted.txHash };
+      };
+
+      if (activeWallets.length === 0) {
+        await prepareAndBlast(undefined);
+        return;
+      }
+
+      const workerCount = sniperWorkerCount(form.parallelWorkers, activeWallets.length);
+      addLog(
+        'SYSTEM',
+        `Spawning ${workerCount} parallel mint worker${workerCount === 1 ? '' : 's'} for ${activeWallets.length} execution wallet${activeWallets.length === 1 ? '' : 's'}.`,
+        'text-synapse-emerald',
+      );
+
+      let nextWalletIndex = 0;
+      const results: Array<{ ok: boolean; wallet: StoredWallet; txHash?: string; error?: string }> = [];
+      const workers = Array.from({ length: workerCount }, async (_, index) => {
+        const workerId = index + 1;
+        while (nextWalletIndex < activeWallets.length) {
+          const wallet = activeWallets[nextWalletIndex];
+          nextWalletIndex += 1;
+          try {
+            const result = await prepareAndBlast(wallet, workerId);
+            if (result.wallet) results.push({ ok: true, wallet: result.wallet, txHash: result.txHash });
+          } catch (err: any) {
+            const message = err.message || 'Mint worker failed';
+            results.push({ ok: false, wallet, error: message });
+            addLog('ERROR', `[worker ${workerId}] ${wallet.name} failed: ${message}`, 'text-red-500');
+          }
+        }
+      });
+
+      await Promise.all(workers);
+
+      const successful = results.filter(result => result.ok).length;
+      const failed = results.length - successful;
+      if (successful > 0) {
+        addLog('SUCCESS', `Parallel mint complete: ${successful}/${activeWallets.length} wallet(s) broadcasted.`, 'text-synapse-emerald');
+      }
+      if (failed > 0) {
+        addLog('WARNING', `Parallel mint finished with ${failed} wallet error(s). Check the worker logs above.`, 'text-yellow-500');
+      }
+      if (successful === 0 && failed > 0) {
+        throw new Error('No selected execution wallet was able to broadcast.');
       }
     } catch (err: any) {
       addLog('ERROR', err.message, 'text-red-500');
@@ -144,9 +349,12 @@ export const Dashboard = () => {
   return (
     <>
       {!isAuthenticated && (
-        <WalletLogin onLogin={(address) => {
+        <WalletLogin onLogin={(address, token) => {
+          setAuthAddress(address);
+          setAuthToken(token);
+          setConfigLoaded(false);
           setIsAuthenticated(true);
-          addLog('SYSTEM', `Authenticated as ${address}. This wallet is login-only and is not an execution wallet.`, 'text-synapse-emerald');
+          addLog('SYSTEM', `Authenticated as ${address}. This wallet is login-only and is not an execution wallet. Saved config sync is enabled.`, 'text-synapse-emerald');
         }} />
       )}
       <main className={`min-h-screen bg-[#030303] text-white selection:bg-synapse-violet/30 pb-24 ${!isAuthenticated ? 'opacity-0 pointer-events-none' : 'opacity-100 transition-opacity duration-1000'}`}>
@@ -242,6 +450,20 @@ export const Dashboard = () => {
                     className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-emerald/50 focus:bg-white/5 transition-colors"
                     required
                   />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Parallel Workers</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max={MAX_SNIPER_WORKERS}
+                    value={form.parallelWorkers}
+                    onChange={(e) => setForm({...form, parallelWorkers: e.target.value})}
+                    className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
+                    required
+                  />
+                  <p className="mt-2 text-xs text-neutral-500">Selected execution wallets are prepared and broadcast concurrently. Max {MAX_SNIPER_WORKERS} workers.</p>
                 </div>
 
                 
