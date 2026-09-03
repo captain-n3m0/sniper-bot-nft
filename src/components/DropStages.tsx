@@ -13,7 +13,11 @@ interface DropStagesProps {
     stage: any,
     context: { chain: string; slug?: string; openseaApiKey?: string },
   ) => void;
-  onSelectStageForScheduler?: (contractAddress: string, targetTime: string) => void;
+  onSelectStageForScheduler?: (
+    contractAddress: string,
+    targetTime: string,
+    context: { chain: string; slug?: string; openseaApiKey?: string; isAllowlist: boolean },
+  ) => void;
 }
 
 interface StageInfo {
@@ -606,8 +610,17 @@ export const DropStages = ({
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const target = dropData?.contract_address || dropData?.address || dropData?.contracts?.[0]?.address || slug;
-                                  const dateIso = new Date(stage.startTime * 1000).toISOString().slice(0, 16);
-                                  onSelectStageForScheduler(target, dateIso);
+                                  const stageDate = new Date(stage.startTime * 1000);
+                                  const localDateTime = new Date(stageDate.getTime() - stageDate.getTimezoneOffset() * 60_000)
+                                    .toISOString()
+                                    .slice(0, 16);
+                                  const targetChain = dropData?.chain || selectedChain;
+                                  onSelectStageForScheduler(target, localDateTime, {
+                                    chain: targetChain,
+                                    slug: dropData?.slug || (!slug.startsWith('0x') ? slug : undefined),
+                                    openseaApiKey: apiKey.trim() || undefined,
+                                    isAllowlist: stage.phase === 'presale' || stage.label.toLowerCase().includes('allowlist'),
+                                  });
                                 }}
                                 className="flex items-center justify-center gap-1.5 rounded-xl border border-synapse-emerald/30 bg-synapse-emerald/10 px-3 py-2 font-mono text-xs text-synapse-emerald transition-colors hover:bg-synapse-emerald/20"
                               >

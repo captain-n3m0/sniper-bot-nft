@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Clock, CheckCircle2, Server, CheckSquare, Square, ShieldCheck, Loader2 } from 'lucide-react';
 import { StoredWallet } from './WalletManager';
 
@@ -7,9 +7,18 @@ interface ScheduledMintingProps {
   wallets: StoredWallet[];
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
+  initialDraft?: SchedulerDraft | null;
 }
 
-export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMintingProps) => {
+export interface SchedulerDraft {
+  contractAddress: string;
+  targetTime: string;
+  openSeaSlug?: string;
+  openSeaApiKey?: string;
+  isAllowlist?: boolean;
+}
+
+export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft }: ScheduledMintingProps) => {
   const [targetTime, setTargetTime] = useState('');
   const [selectedWalletIds, setSelectedWalletIds] = useState<Set<string>>(new Set());
   
@@ -17,6 +26,8 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
     contractAddress: '',
     quantity: '1',
     apiKey: '',
+    openSeaSlug: '',
+    openSeaApiKey: '',
     isAllowlist: false,
     mintParams: '',
     salt: '',
@@ -24,8 +35,20 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
   });
 
   const [isScheduling, setIsScheduling] = useState(false);
-  const [scheduledJob, setScheduledJob] = useState<{taskId: string, targetTime: string, walletCount: number, chain: string} | null>(null);
+  const [scheduledJob, setScheduledJob] = useState<{taskId: string, targetTime: string, walletCount: number, chain: string, source?: string, openSeaSlug?: string} | null>(null);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!initialDraft) return;
+    setTargetTime(initialDraft.targetTime);
+    setForm((current) => ({
+      ...current,
+      contractAddress: initialDraft.contractAddress,
+      openSeaSlug: initialDraft.openSeaSlug || '',
+      openSeaApiKey: initialDraft.openSeaApiKey || '',
+      isAllowlist: Boolean(initialDraft.isAllowlist),
+    }));
+  }, [initialDraft]);
 
   const toggleWallet = (id: string) => {
     const next = new Set(selectedWalletIds);
@@ -60,7 +83,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
 
     try {
       let mintParamsObj;
-      if (form.isAllowlist) {
+      if (form.isAllowlist && !form.openSeaSlug.trim()) {
         if (!form.mintParams || !form.salt || !form.signature) {
           throw new Error("Missing Allowlist signature payload");
         }
@@ -80,6 +103,9 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
         salt: form.salt,
         signature: form.signature,
         apiKey: form.apiKey,
+        slug: form.openSeaSlug.trim() || undefined,
+        openseaApiKey: form.openSeaApiKey.trim() || undefined,
+        feeTier: 'fast',
         wallets: Array.from(selectedWalletIds).map(id => wallets.find(w => w.id === id)),
         chain: selectedChain
       };
@@ -103,6 +129,8 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
         contractAddress: '',
         quantity: '1',
         apiKey: '',
+        openSeaSlug: '',
+        openSeaApiKey: '',
         isAllowlist: false,
         mintParams: '',
         salt: '',
@@ -131,7 +159,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
       </div>
 
       <div className="mb-6 rounded-xl border border-synapse-violet/20 bg-synapse-violet/5 p-4 text-xs text-synapse-violet">
-        <p><strong>Real Execution:</strong> The backend cron worker builds real mint payloads, estimates real gas limits, and broadcasts signed transactions asynchronously at the target time. You may safely close the browser.</p>
+        <p><strong>Real Execution:</strong> OpenSea schedules fetch and validate an exact wallet-specific mint action for every selected wallet shortly before execution. Standard on-chain schedules use the configured SeaDrop stage directly. You may safely close the browser.</p>
       </div>
 
       {scheduledJob ? (
@@ -145,6 +173,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
             <p className="mb-2"><span className="text-neutral-500">Target:</span> {new Date(scheduledJob.targetTime).toLocaleString()}</p>
             <p className="mb-2"><span className="text-neutral-500">Wallets:</span> {scheduledJob.walletCount} connected</p>
             <p><span className="text-neutral-500">Chain:</span> {scheduledJob.chain}</p>
+            <p className="mt-2"><span className="text-neutral-500">Action:</span> {scheduledJob.source === 'opensea-mint-action' ? `OpenSea exact action (${scheduledJob.openSeaSlug})` : 'On-chain SeaDrop plan'}</p>
           </div>
           <button
             onClick={() => setScheduledJob(null)}
@@ -164,7 +193,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
             <div>
               <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">
-                Contract Address / Slug
+                Contract Address
               </label>
               <input 
                 type="text" 
@@ -209,6 +238,37 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
             </div>
           </div>
 
+          <div className="rounded-xl border border-synapse-cyan/20 bg-synapse-cyan/[0.04] p-4">
+            <div className="mb-4 flex items-center gap-2">
+              <ShieldCheck size={15} className="text-synapse-cyan" />
+              <span className="font-mono text-xs font-semibold uppercase tracking-widest text-synapse-cyan">OpenSea Scheduled Action</span>
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Collection Slug</label>
+                <input
+                  type="text"
+                  value={form.openSeaSlug}
+                  onChange={(e) => setForm({...form, openSeaSlug: e.target.value})}
+                  className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none transition-colors focus:border-synapse-cyan/50"
+                  placeholder="collection-slug"
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">OpenSea API Key</label>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={form.openSeaApiKey}
+                  onChange={(e) => setForm({...form, openSeaApiKey: e.target.value})}
+                  className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none transition-colors focus:border-synapse-cyan/50"
+                  placeholder="Required for wallet-specific stages"
+                />
+              </div>
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-neutral-500">When a slug is provided, the server validates it now and requests fresh per-wallet calldata during the 10-second pre-arm window. The key remains only in the in-memory job and is cleared after completion or cancellation.</p>
+          </div>
+
           <div className="pt-4 border-t border-white/5">
             <label className="flex items-center gap-3 cursor-pointer mb-4">
               <input 
@@ -217,11 +277,12 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain }: ScheduledMi
                 onChange={(e) => setForm({...form, isAllowlist: e.target.checked})}
                 className="accent-synapse-violet w-4 h-4 rounded"
               />
-              <span className="text-sm font-medium text-neutral-300">Allowlist Phase (Requires Signatures)</span>
+              <span className="text-sm font-medium text-neutral-300">Allowlist / Signed Phase</span>
             </label>
+            <p className="text-xs text-neutral-500">With an OpenSea slug, signatures are fetched automatically per wallet. Without a slug, you must provide the manual voucher below.</p>
           </div>
 
-          {form.isAllowlist && (
+          {form.isAllowlist && !form.openSeaSlug.trim() && (
             <div className="space-y-4 rounded-xl border border-white/5 bg-black/30 p-4">
               <div>
                 <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Mint Params JSON</label>

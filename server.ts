@@ -1967,11 +1967,21 @@ interface SchedulerJob {
   targetBlock?: number;
   chain: ChainConfig;
   endpoints: string[];
-  plan: MintPlan;
+  plan?: MintPlan;
+  contractAddress: string;
+  mode: "public" | "allowlist";
+  quantity: number;
+  openSea?: {
+    slug: string;
+    apiKey: string;
+    keySource: OpenSeaKeyRecord["source"];
+  };
   privateKeys: string[];
   walletCount: number;
   signedTransactions?: string[];
   arming?: Promise<void>;
+  nextArmAttemptAt: number;
+  armAttempts: number;
   warmed: boolean;
   lastBlockPollAt: number;
   result?: unknown;
@@ -2018,8 +2028,12 @@ function schedulerPublic(job: SchedulerJob) {
     taskId: job.id,
     status: job.status,
     chain: job.chain.key,
-    contractAddress: job.plan.contractAddress,
-    mode: job.plan.mode,
+    contractAddress: job.contractAddress,
+    mode: job.mode,
+    source: job.openSea ? "opensea-mint-action" : "local-seadrop-plan",
+    openSeaSlug: job.openSea?.slug,
+    openSeaKeySource: job.openSea?.keySource,
+    armAttempts: job.armAttempts,
     walletCount: job.walletCount,
     targetTime: job.targetTime ? new Date(job.targetTime).toISOString() : undefined,
     targetBlock: job.targetBlock,
@@ -2030,26 +2044,121 @@ function schedulerPublic(job: SchedulerJob) {
   };
 }
 
-async function armSchedulerJob(job: SchedulerJob): Promise<void> {
-  if (job.signedTransactions || job.arming || !["pending", "running"].includes(job.status)) return;
-  job.arming = (async () => {
-    const transaction = {
-      to: job.plan.to,
-      data: job.plan.data,
-      value: job.plan.value.toString(),
-      chainId: job.chain.chainId,
-    };
-    const signedTransactions = await Promise.all(
-      job.privateKeys.map((key) =>
-        signTransactionPayload(transaction, key, job.chain, job.endpoints),
-      ),
+async function validateScheduledOpenSeaSource(
+  slug: string,
+  apiKey: string,
+  contractAddress: string,
+  chain: ChainConfig,
+) {
+  const [dropResult, collectionResult] = await Promise.allSettled([
+    openSeaRequest(`/drops/${encodeURIComponent(slug)}`, apiKey),
+    openSeaRequest(`/collections/${encodeURIComponent(slug)}`, apiKey),
+  ]);
+  if (dropResult.status === "rejected" && collectionResult.status === "rejected") {
+    throw new ApiError(
+      400,
+      `OpenSea slug or API key validation failed: ${errorMessage(dropResult.reason)}`,
     );
-    if (["pending", "running"].includes(job.status)) job.signedTransactions = signedTransactions;
+  }
+  const contracts = [
+    ...(dropResult.status === "fulfilled" ? extractContracts(dropResult.value) : []),
+    ...(collectionResult.status === "fulfilled" ? extractContracts(collectionResult.value) : []),
+  ];
+  if (contracts.length) {
+    const matchingContract = contracts.find(
+      (item) =>
+        typeof item?.address === "string" &&
+        item.address.toLowerCase() === contractAddress.toLowerCase() &&
+        (!resolveContractChain(item) || resolveContractChain(item)?.chainId === chain.chainId),
+    );
+    if (!matchingContract) {
+      throw new ApiError(400, "The OpenSea slug does not match the scheduled contract and chain");
+    }
+  }
+}
+
+async function scheduledOpenSeaTransaction(job: SchedulerJob, privateKey: string) {
+  if (!job.openSea?.apiKey) throw new Error("The scheduled OpenSea API key is unavailable");
+  const wallet = walletFromPrivateKey(privateKey);
+  const action = await openSeaRequest(`/drops/${encodeURIComponent(job.openSea.slug)}/mint`, job.openSea.apiKey, {
+    method: "POST",
+    body: { minter: wallet.address, quantity: job.quantity },
+  });
+  const transaction = normalizeOpenSeaMintTransaction(action);
+  const decoded = decodeMintTransaction(transaction, wallet.address);
+  if (!["mintPublic", "mintSigned"].includes(decoded.method)) {
+    throw new Error(`OpenSea returned unsupported scheduled action: ${decoded.method}`);
+  }
+  if (decoded.nftContract?.toLowerCase() !== job.contractAddress.toLowerCase()) {
+    throw new Error("OpenSea scheduled action targets a different NFT contract");
+  }
+  if (decoded.recipientMatches === false) {
+    throw new Error("OpenSea scheduled action targets a different execution wallet");
+  }
+  if (decoded.quantity !== String(job.quantity)) {
+    throw new Error("OpenSea scheduled action quantity does not match the scheduled quantity");
+  }
+  if (decoded.valueMatches === false) {
+    throw new Error("OpenSea scheduled action value does not match its signed mint price");
+  }
+  const deploymentWarning = await mintContractDeploymentWarning(
+    job.chain,
+    job.endpoints,
+    decoded.nftContract,
+  );
+  if (deploymentWarning) throw new Error(deploymentWarning);
+  const prepared = await prepareForWallet(
+    job.chain,
+    job.endpoints,
+    transaction,
+    wallet,
+    "fast",
+  );
+  if (
+    !prepared.simulation.ok &&
+    (isInsufficientBalanceReason(prepared.simulation.reason) ||
+      isDefinitiveEligibilityReason(String(prepared.simulation.reason || "")))
+  ) {
+    throw new Error(prepared.simulation.reason || "Scheduled OpenSea action simulation failed");
+  }
+  const { simulation: _simulation, ...signable } = prepared;
+  return signTransactionPayload(signable, privateKey, job.chain, job.endpoints);
+}
+
+async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> {
+  if (job.signedTransactions || job.arming || !["pending", "running"].includes(job.status)) return;
+  if (!force && job.nextArmAttemptAt > Date.now()) return;
+  job.armAttempts += 1;
+  job.arming = (async () => {
+    const signedTransactions = job.openSea
+      ? await Promise.all(job.privateKeys.map((key) => scheduledOpenSeaTransaction(job, key)))
+      : await Promise.all(
+          job.privateKeys.map((key) => {
+            if (!job.plan) throw new Error("Scheduled on-chain mint plan is unavailable");
+            return signTransactionPayload(
+              {
+                to: job.plan.to,
+                data: job.plan.data,
+                value: job.plan.value.toString(),
+                chainId: job.chain.chainId,
+              },
+              key,
+              job.chain,
+              job.endpoints,
+            );
+          }),
+        );
+    if (["pending", "running"].includes(job.status)) {
+      job.signedTransactions = signedTransactions;
+      job.error = undefined;
+      job.nextArmAttemptAt = 0;
+    }
   })();
   try {
     await job.arming;
   } catch (error) {
     job.error = `Pre-sign failed; will retry at execution: ${errorMessage(error).slice(0, 200)}`;
+    job.nextArmAttemptAt = Date.now() + (job.openSea ? 1_000 : 500);
     logServerError("scheduler-pre-sign", error, {
       jobId: job.id,
       chain: job.chain.key,
@@ -2065,8 +2174,16 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
   job.status = "running";
   job.updatedAt = new Date().toISOString();
   try {
-    if (job.arming) await job.arming;
-    if (!job.signedTransactions) await armSchedulerJob(job);
+    if (job.arming) {
+      const activeArming = job.arming;
+      try {
+        await activeArming;
+      } catch {
+        // armSchedulerJob records the error and the forced attempt below retries.
+      }
+      if (job.arming === activeArming) job.arming = undefined;
+    }
+    if (!job.signedTransactions) await armSchedulerJob(job, true);
     if (!job.signedTransactions) throw new Error(job.error || "Unable to sign scheduled transactions");
     const results = await Promise.all(
       job.signedTransactions.map((signedTx) =>
@@ -2087,6 +2204,7 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
   } finally {
     job.privateKeys = [];
     job.signedTransactions = undefined;
+    if (job.openSea) job.openSea.apiKey = "";
     job.updatedAt = new Date().toISOString();
   }
 }
@@ -2109,8 +2227,9 @@ async function schedulerTick() {
       if (job.status !== "pending") continue;
       if (job.targetTime !== undefined) {
         const remaining = job.targetTime - now;
-        if (remaining <= 5_000) void warmRpcEndpoints(job);
-        if (remaining <= 3_000 && remaining > 0) void armSchedulerJob(job);
+        if (remaining <= 15_000) void warmRpcEndpoints(job);
+        const armWindow = job.openSea ? 10_000 : 3_000;
+        if (remaining <= armWindow && remaining > 0) void armSchedulerJob(job);
         if (remaining <= 0) void executeSchedulerJob(job);
         continue;
       }
@@ -3526,7 +3645,40 @@ app.post(
       throw new ApiError(400, "targetBlock must be a safe integer");
     }
     const privateKeys = privateKeysFrom(body);
-    const { chain, endpoints, plan } = await buildMintPlan(body);
+    const requestedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
+    let chain: ChainConfig;
+    let endpoints: string[];
+    let plan: MintPlan | undefined;
+    let openSea: SchedulerJob["openSea"];
+    let contractAddress: string;
+    let mode: "public" | "allowlist";
+    let quantity: number;
+    if (requestedSlug) {
+      if (requestedSlug.length > 160 || /[\s/?#]/.test(requestedSlug)) {
+        throw new ApiError(400, "slug must be a valid OpenSea collection slug");
+      }
+      chain = requireChain(body.chain);
+      endpoints = rpcUrlsFor(chain, body);
+      contractAddress = requireAddress(body.contractAddress || body.nftContract);
+      mode = modeFrom(body);
+      quantity = requireQuantity(body.quantity);
+      const keyRecord = await resolveOpenSeaApiKey(body.openseaApiKey);
+      await validateScheduledOpenSeaSource(
+        requestedSlug,
+        keyRecord.key,
+        contractAddress,
+        chain,
+      );
+      openSea = { slug: requestedSlug, apiKey: keyRecord.key, keySource: keyRecord.source };
+    } else {
+      const built = await buildMintPlan(body);
+      chain = built.chain;
+      endpoints = built.endpoints;
+      plan = built.plan;
+      contractAddress = plan.contractAddress;
+      mode = plan.mode;
+      quantity = requireQuantity(body.quantity);
+    }
     if (targetBlock !== undefined) {
       const currentBlock = await withRpcFallback(endpoints, (url) =>
         providerFor(url, chain).getBlockNumber(),
@@ -3544,8 +3696,14 @@ app.post(
       chain,
       endpoints,
       plan,
+      contractAddress,
+      mode,
+      quantity,
+      openSea,
       privateKeys,
       walletCount: privateKeys.length,
+      nextArmAttemptAt: 0,
+      armAttempts: 0,
       warmed: false,
       lastBlockPollAt: 0,
     };
@@ -3570,6 +3728,7 @@ app.delete("/api/scheduler/jobs/:id", (req, res) => {
   job.status = "cancelled";
   job.privateKeys = [];
   job.signedTransactions = undefined;
+  if (job.openSea) job.openSea.apiKey = "";
   job.updatedAt = new Date().toISOString();
   res.json({ success: true, job: schedulerPublic(job) });
 });

@@ -6,7 +6,7 @@ import { ShinyButton } from '../components/ShinyButton';
 import { WalletManager, StoredWallet } from '../components/WalletManager';
 import { ChainSelector } from '../components/ChainSelector';
 import { DropStages } from '../components/DropStages';
-import { ScheduledMinting } from '../components/ScheduledMinting';
+import { ScheduledMinting, type SchedulerDraft } from '../components/ScheduledMinting';
 import { GasEstimator } from '../components/GasEstimator';
 import { WalletLogin } from '../components/WalletLogin';
 import { LiveTransactionFee } from '../components/LiveTransactionFee';
@@ -82,6 +82,7 @@ export const Dashboard = () => {
   const [wallets, setWallets] = useState<StoredWallet[]>([]);
   const [selectedChain, setSelectedChain] = useState<string>('ethereum');
   const [selectedSniperWallets, setSelectedSniperWallets] = useState<Set<string>>(new Set());
+  const [schedulerDraft, setSchedulerDraft] = useState<SchedulerDraft | null>(null);
   const [mintFeeBasis, setMintFeeBasis] = useState({ gasLimit: '350000', valueWei: null as string | null, exact: false });
 
   const [form, setForm] = useState<SniperFormState>(DEFAULT_SNIPER_FORM);
@@ -641,15 +642,28 @@ export const Dashboard = () => {
                   setActiveTab('sniper');
                   addLog('INFO', `Stage "${stage.label}" loaded on ${context.chain}; OpenSea mint-action verification enabled.`, 'text-synapse-violet');
                 }}
-                onSelectStageForScheduler={(contractAddress, targetTime) => {
+                onSelectStageForScheduler={(contractAddress, targetTime, context) => {
+                  setSelectedChain(context.chain);
+                  setSchedulerDraft({
+                    contractAddress,
+                    targetTime,
+                    openSeaSlug: context.slug,
+                    openSeaApiKey: context.openseaApiKey,
+                    isAllowlist: context.isAllowlist,
+                  });
                   setActiveTab('scheduler');
-                  addLog('INFO', `Drop stage scheduled time (${targetTime}) ready for setup.`, 'text-synapse-emerald');
+                  addLog('INFO', `Drop stage, chain, OpenSea slug, API key, and scheduled time (${targetTime}) loaded into Scheduler.`, 'text-synapse-emerald');
                 }}
               />
             )}
 
             {activeTab === 'scheduler' && (
-              <ScheduledMinting wallets={wallets} selectedChain={selectedChain} addLog={addLog} />
+              <ScheduledMinting
+                wallets={wallets}
+                selectedChain={selectedChain}
+                addLog={addLog}
+                initialDraft={schedulerDraft}
+              />
             )}
 
             {activeTab === 'gas' && (
