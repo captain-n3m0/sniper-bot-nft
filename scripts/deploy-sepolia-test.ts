@@ -18,7 +18,7 @@ import {
 const CHAIN = { chainId: 11_155_111, name: "sepolia" } as const;
 const SEADROP_ADDRESS = "0x00005EA00Ac477B1030CE78506496e8C2dE24bf5";
 const WALLET_PATH = resolve(".sepolia-test-deployer.json");
-const DEPLOYMENT_PATH = resolve("testnet/sepolia-deployment.json");
+const DEPLOYMENT_PATH = resolve(process.env.TESTNET_DEPLOYMENT_PATH || "testnet/sepolia-deployment.json");
 const CONTRACT_PATH = resolve("contracts/SeaDropSniperTestNFT.sol");
 const MINIMUM_BALANCE = parseEther("0.01");
 
@@ -130,7 +130,7 @@ async function main() {
     return;
   }
 
-  if (existsSync(DEPLOYMENT_PATH)) {
+  if (existsSync(DEPLOYMENT_PATH) && process.env.FORCE_TESTNET_DEPLOY !== "1") {
     const previous = JSON.parse(readFileSync(DEPLOYMENT_PATH, "utf8")) as { contractAddress?: string };
     if (previous.contractAddress) {
       const code = await provider.getCode(previous.contractAddress);
@@ -155,7 +155,8 @@ async function main() {
 
   const latestBlock = await provider.getBlock("latest");
   if (!latestBlock) throw new Error("Could not read the latest Sepolia block");
-  const startTime = latestBlock.timestamp + 180;
+  const configuredDelay = Number(process.env.TESTNET_STAGE_DELAY_SECONDS || 180);
+  const startTime = latestBlock.timestamp + Math.max(30, Math.floor(configuredDelay));
   const endTime = startTime + 86_400;
   const maxPerWallet = 3;
   const mintPrice = 0n;

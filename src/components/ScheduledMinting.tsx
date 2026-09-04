@@ -7,6 +7,9 @@ interface ScheduledMintingProps {
   wallets: StoredWallet[];
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
+  authToken: string;
+  savedOpenSeaApiKey?: string;
+  onOpenSeaApiKeyChange?: (value: string) => void;
   initialDraft?: SchedulerDraft | null;
 }
 
@@ -18,7 +21,20 @@ export interface SchedulerDraft {
   isAllowlist?: boolean;
 }
 
-export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft }: ScheduledMintingProps) => {
+interface SchedulerJobSummary {
+  id: string;
+  status: 'pending' | 'paused' | 'running' | 'completed' | 'failed' | 'stopped';
+  chain: string;
+  contractAddress: string;
+  targetTime?: string;
+  targetBlock?: number;
+  walletCount: number;
+  source: string;
+  error?: string;
+  wallets?: Array<{ id: string; name: string; address: string; status: string; txHash?: string; error?: string }>;
+}
+
+export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, savedOpenSeaApiKey, onOpenSeaApiKeyChange, initialDraft }: ScheduledMintingProps) => {
   const [targetTime, setTargetTime] = useState('');
   const [selectedWalletIds, setSelectedWalletIds] = useState<Set<string>>(new Set());
   
@@ -36,6 +52,38 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
   const [isScheduling, setIsScheduling] = useState(false);
   const [scheduledJob, setScheduledJob] = useState<{taskId: string, targetTime: string, walletCount: number, chain: string, source?: string, openSeaSlug?: string} | null>(null);
   const [error, setError] = useState('');
+  const [jobs, setJobs] = useState<SchedulerJobSummary[]>([]);
+  const [jobsLoading, setJobsLoading] = useState(false);
+  const [jobAction, setJobAction] = useState('');
+
+  const loadJobs = async (quiet = false) => {
+    if (!authToken) return;
+    if (!quiet) setJobsLoading(true);
+    try {
+      const response = await fetch('/api/scheduler/jobs', {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load scheduler jobs');
+      setJobs(Array.isArray(data.jobs) ? data.jobs : []);
+    } catch (loadError) {
+      if (!quiet) setError(loadError instanceof Error ? loadError.message : 'Could not load scheduler jobs');
+    } finally {
+      if (!quiet) setJobsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadJobs();
+    const timer = setInterval(() => void loadJobs(true), 2_000);
+    return () => clearInterval(timer);
+  }, [authToken]);
+
+  useEffect(() => {
+    if (savedOpenSeaApiKey && !form.openSeaApiKey) {
+      setForm((current) => ({ ...current, openSeaApiKey: savedOpenSeaApiKey }));
+    }
+  }, [savedOpenSeaApiKey]);
 
   useEffect(() => {
     if (!initialDraft) return;
@@ -110,7 +158,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
 
       const response = await fetch('/api/scheduler/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
         body: JSON.stringify(payload)
       });
 
@@ -120,6 +168,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
       }
 
       setScheduledJob(data);
+      void loadJobs(true);
       addLog('SUCCESS', `Task [${data.taskId}] scheduled for ${scheduledDate.toLocaleString()}`, 'text-synapse-emerald');
       
       // Reset form (keep wallets selected for convenience)
@@ -127,7 +176,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
         contractAddress: '',
         quantity: '1',
         openSeaSlug: '',
-        openSeaApiKey: '',
+        openSeaApiKey: savedOpenSeaApiKey || '',
         isAllowlist: false,
         mintParams: '',
         salt: '',
@@ -139,6 +188,27 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
       addLog('ERROR', `Scheduling failed: ${err.message}`, 'text-red-500');
     } finally {
       setIsScheduling(false);
+    }
+  };
+
+  const controlJob = async (job: SchedulerJobSummary, action: 'pause' | 'resume' | 'stop' | 'delete') => {
+    setJobAction(`${job.id}:${action}`);
+    setError('');
+    try {
+      const response = await fetch(
+        action === 'delete' ? `/api/scheduler/jobs/${job.id}` : `/api/scheduler/jobs/${job.id}/${action}`,
+        { method: action === 'delete' ? 'DELETE' : 'POST', headers: { Authorization: `Bearer ${authToken}` } },
+      );
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Could not ${action} job`);
+      addLog('SYSTEM', `Scheduler job ${job.id.slice(0, 8)} ${action === 'delete' ? 'deleted' : `${action} request accepted`}.`, 'text-synapse-emerald');
+      await loadJobs(true);
+    } catch (actionError) {
+      const message = actionError instanceof Error ? actionError.message : `Could not ${action} job`;
+      setError(message);
+      addLog('ERROR', `Scheduler control failed: ${message}`, 'text-red-500');
+    } finally {
+      setJobAction('');
     }
   };
 
@@ -157,6 +227,47 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
 
       <div className="mb-6 rounded-xl border border-synapse-violet/20 bg-synapse-violet/5 p-4 text-xs text-synapse-violet">
         <p><strong>Real Execution:</strong> OpenSea schedules fetch and validate an exact wallet-specific mint action for every selected wallet shortly before execution. Standard on-chain schedules use the configured SeaDrop stage directly. You may safely close the browser.</p>
+      </div>
+
+      <div className="mb-8 rounded-xl border border-white/5 bg-black/30 p-4">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="font-mono text-xs font-semibold uppercase tracking-widest text-white">Your Scheduler Jobs</h3>
+          <button type="button" onClick={() => void loadJobs()} className="text-xs text-synapse-cyan hover:underline">{jobsLoading ? 'Refreshing…' : 'Refresh'}</button>
+        </div>
+        {jobs.length === 0 ? (
+          <p className="text-xs text-neutral-500">No queued, running, or historical jobs yet.</p>
+        ) : (
+          <div className="max-h-80 space-y-3 overflow-y-auto pr-1 custom-scrollbar">
+            {jobs.map((job) => (
+              <div key={job.id} className="rounded-lg border border-white/5 bg-black/40 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-mono text-xs text-white">{job.contractAddress.slice(0, 8)}…{job.contractAddress.slice(-6)}</div>
+                    <div className="mt-1 text-[11px] text-neutral-500">{job.chain} · {job.targetTime ? new Date(job.targetTime).toLocaleString() : `block ${job.targetBlock}`} · {job.walletCount} wallet(s)</div>
+                  </div>
+                  <span className={`rounded-full border px-2 py-1 font-mono text-[10px] uppercase ${job.status === 'completed' ? 'border-emerald-500/30 text-emerald-400' : job.status === 'failed' ? 'border-red-500/30 text-red-400' : job.status === 'paused' ? 'border-yellow-500/30 text-yellow-400' : 'border-cyan-500/30 text-cyan-400'}`}>{job.status === 'pending' ? 'queued' : job.status}</span>
+                </div>
+                {job.error && <p className="mt-2 text-[11px] text-red-400">{job.error}</p>}
+                {Boolean(job.wallets?.length) && (
+                  <div className="mt-3 space-y-1 border-t border-white/5 pt-2">
+                    {job.wallets!.map((wallet) => (
+                      <div key={wallet.id} className="flex items-center justify-between gap-3 text-[10px]">
+                        <span className="truncate text-neutral-400">{wallet.name} · {wallet.address.slice(0, 6)}…{wallet.address.slice(-4)}</span>
+                        <span className={wallet.status === 'completed' ? 'text-emerald-400' : wallet.status === 'failed' ? 'text-red-400' : 'text-neutral-500'}>{wallet.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {job.status === 'pending' && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'pause')} className="rounded border border-yellow-500/30 px-2 py-1 text-[10px] text-yellow-400">Pause</button>}
+                  {job.status === 'paused' && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'resume')} className="rounded border border-emerald-500/30 px-2 py-1 text-[10px] text-emerald-400">Resume</button>}
+                  {['pending', 'paused', 'running'].includes(job.status) && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'stop')} className="rounded border border-red-500/30 px-2 py-1 text-[10px] text-red-400">Stop</button>}
+                  {job.status !== 'running' && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'delete')} className="rounded border border-white/10 px-2 py-1 text-[10px] text-neutral-400">Delete</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {scheduledJob ? (
@@ -248,13 +359,16 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
                   type="password"
                   autoComplete="off"
                   value={form.openSeaApiKey}
-                  onChange={(e) => setForm({...form, openSeaApiKey: e.target.value})}
+                  onChange={(e) => {
+                    setForm({...form, openSeaApiKey: e.target.value});
+                    onOpenSeaApiKeyChange?.(e.target.value);
+                  }}
                   className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none transition-colors focus:border-synapse-cyan/50"
                   placeholder="Required for wallet-specific stages"
                 />
               </div>
             </div>
-            <p className="mt-3 text-xs leading-relaxed text-neutral-500">When a slug is provided, the server validates it now and requests fresh per-wallet calldata during the 10-second pre-arm window. The key remains only in the in-memory job and is cleared after completion or cancellation.</p>
+            <p className="mt-3 text-xs leading-relaxed text-neutral-500">When a slug is provided, the server validates it now and requests fresh per-wallet calldata during the 10-second pre-arm window. The job and key are encrypted at rest and sensitive execution data is cleared after completion or stopping.</p>
           </div>
 
           <div className="pt-4 border-t border-white/5">

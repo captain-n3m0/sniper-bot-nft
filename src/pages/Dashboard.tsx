@@ -14,6 +14,7 @@ import { resolveChain } from '../lib/chains';
 
 const MAX_SNIPER_WORKERS = 24;
 const CONFIG_SAVE_DELAY_MS = 700;
+const WALLET_SAVE_DELAY_MS = 500;
 
 type DashboardTab = 'sniper' | 'wallets' | 'stages' | 'scheduler' | 'gas';
 
@@ -84,8 +85,11 @@ export const Dashboard = () => {
 
   const [form, setForm] = useState<SniperFormState>(DEFAULT_SNIPER_FORM);
   const [configLoaded, setConfigLoaded] = useState(false);
+  const [walletsLoaded, setWalletsLoaded] = useState(false);
   const lastSavedConfig = useRef('');
+  const lastSavedWallets = useRef('');
   const configSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const walletSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const configSaveErrorLogged = useRef(false);
 
   const [logs, setLogs] = useState<{ time: string; type: string; message: string; color: string }[]>([
@@ -103,12 +107,15 @@ export const Dashboard = () => {
     setAuthToken('');
     setAuthAddress('');
     setConfigLoaded(false);
+    setWalletsLoaded(false);
+    setWallets([]);
     setIsAuthenticated(false);
   };
 
   useEffect(() => {
     if (!isAuthenticated || !authToken) {
       setConfigLoaded(false);
+      setWalletsLoaded(false);
       return;
     }
 
@@ -122,6 +129,15 @@ export const Dashboard = () => {
         if (!response.ok || !data.success) {
           if (response.status === 401) clearAuth();
           throw new Error(data.error || 'Could not load saved config');
+        }
+        if (cancelled) return;
+
+        const walletsResponse = await fetch('/api/user/wallets', {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        const walletsData = await walletsResponse.json();
+        if (!walletsResponse.ok || !walletsData.success || !Array.isArray(walletsData.wallets)) {
+          throw new Error(walletsData.error || 'Could not load saved execution wallets');
         }
         if (cancelled) return;
 
@@ -142,8 +158,11 @@ export const Dashboard = () => {
         setSelectedChain(nextChain);
         setActiveTab(nextTab);
         setForm(nextForm);
+        setWallets(walletsData.wallets);
+        lastSavedWallets.current = JSON.stringify(walletsData.wallets);
         lastSavedConfig.current = JSON.stringify(persistedConfig(nextChain, nextForm, nextTab));
         setConfigLoaded(true);
+        setWalletsLoaded(true);
         addLog(
           'SYSTEM',
           data.updatedAt ? `Loaded saved config for ${data.address}.` : `No saved config yet for ${data.address}; auto-save is ready.`,
@@ -152,6 +171,7 @@ export const Dashboard = () => {
       } catch (err: any) {
         if (cancelled) return;
         setConfigLoaded(true);
+        setWalletsLoaded(true);
         addLog('ERROR', `Saved config sync failed: ${err.message || 'Unknown error'}`, 'text-red-500');
       }
     };
@@ -200,6 +220,38 @@ export const Dashboard = () => {
       if (configSaveTimer.current) clearTimeout(configSaveTimer.current);
     };
   }, [isAuthenticated, authToken, configLoaded, selectedChain, form, activeTab]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !authToken || !walletsLoaded) return;
+    const serialized = JSON.stringify(wallets);
+    if (serialized === lastSavedWallets.current) return;
+    if (walletSaveTimer.current) clearTimeout(walletSaveTimer.current);
+    walletSaveTimer.current = setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch('/api/user/wallets', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authToken}`
+            },
+            body: JSON.stringify({ wallets })
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success || !Array.isArray(data.wallets)) {
+            if (response.status === 401) clearAuth();
+            throw new Error(data.error || 'Could not save execution wallets');
+          }
+          lastSavedWallets.current = JSON.stringify(data.wallets);
+        } catch (err: any) {
+          addLog('ERROR', `Could not save execution wallets: ${err.message || 'Unknown error'}`, 'text-red-500');
+        }
+      })();
+    }, WALLET_SAVE_DELAY_MS);
+    return () => {
+      if (walletSaveTimer.current) clearTimeout(walletSaveTimer.current);
+    };
+  }, [isAuthenticated, authToken, walletsLoaded, wallets]);
 
   const handleSnipe = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -602,6 +654,8 @@ export const Dashboard = () => {
                 wallets={wallets} 
                 addLog={addLog} 
                 selectedChain={selectedChain}
+                openSeaApiKey={form.openSeaApiKey}
+                onOpenSeaApiKeyChange={(openSeaApiKey) => setForm((current) => ({ ...current, openSeaApiKey }))}
                 onDetectedChain={setSelectedChain}
                 onSelectStageForSniper={(contractAddress, stage, context) => {
                   setSelectedChain(context.chain);
@@ -643,6 +697,9 @@ export const Dashboard = () => {
                 wallets={wallets}
                 selectedChain={selectedChain}
                 addLog={addLog}
+                authToken={authToken}
+                savedOpenSeaApiKey={form.openSeaApiKey}
+                onOpenSeaApiKeyChange={(openSeaApiKey) => setForm((current) => ({ ...current, openSeaApiKey }))}
                 initialDraft={schedulerDraft}
               />
             )}

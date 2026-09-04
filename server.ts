@@ -1297,6 +1297,7 @@ async function broadcastSignedTransaction(
   chain: ChainConfig,
   endpoints: string[],
 ) {
+  const broadcastStartedAt = Date.now();
   let parsed: Transaction;
   try {
     parsed = Transaction.from(signedTx);
@@ -1360,6 +1361,8 @@ async function broadcastSignedTransaction(
   return {
     txHash,
     acceptedBy: first.rpc,
+    acceptedAt: new Date().toISOString(),
+    submissionLatencyMs: Date.now() - broadcastStartedAt,
     statusUrl: `/api/blast-mint/status/${txHash}`,
   };
 }
@@ -1978,9 +1981,28 @@ function normalizeStage(stage: any, index: number) {
   };
 }
 
+type SchedulerJobStatus = "pending" | "paused" | "running" | "completed" | "failed" | "stopped";
+type SchedulerWalletStatus = "queued" | "preparing" | "ready" | "broadcasting" | "completed" | "failed" | "stopped";
+
+interface SchedulerWalletTask {
+  id: string;
+  name: string;
+  address: string;
+  privateKey: string;
+  status: SchedulerWalletStatus;
+  signedTransaction?: string;
+  txHash?: string;
+  acceptedBy?: string;
+  acceptedAt?: string;
+  submissionLatencyMs?: number;
+  targetOffsetMs?: number;
+  error?: string;
+}
+
 interface SchedulerJob {
   id: string;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  ownerAddressKey: string;
+  status: SchedulerJobStatus;
   createdAt: string;
   updatedAt: string;
   targetTime?: number;
@@ -1996,9 +2018,8 @@ interface SchedulerJob {
     apiKey: string;
     keySource: OpenSeaKeyRecord["source"];
   };
-  privateKeys: string[];
+  wallets: SchedulerWalletTask[];
   walletCount: number;
-  signedTransactions?: string[];
   arming?: Promise<void>;
   nextArmAttemptAt: number;
   armAttempts: number;
@@ -2006,6 +2027,9 @@ interface SchedulerJob {
   lastBlockPollAt: number;
   result?: unknown;
   error?: string;
+  stopRequested?: boolean;
+  deleted?: boolean;
+  recoveredAfterRestart?: boolean;
 }
 
 const schedulerJobs = new Map<string, SchedulerJob>();
@@ -2042,6 +2066,31 @@ function privateKeysFrom(body: Record<string, any>): string[] {
   return [...byAddress.values()];
 }
 
+function schedulerWalletsFrom(body: Record<string, any>): SchedulerWalletTask[] {
+  const namesByAddress = new Map<string, { id?: string; name?: string }>();
+  if (Array.isArray(body.wallets)) {
+    for (const item of body.wallets) {
+      if (!item || typeof item !== "object" || typeof item.privateKey !== "string") continue;
+      const wallet = walletFromPrivateKey(item.privateKey);
+      namesByAddress.set(wallet.address.toLowerCase(), {
+        id: typeof item.id === "string" ? item.id : undefined,
+        name: typeof item.name === "string" ? item.name : undefined,
+      });
+    }
+  }
+  return privateKeysFrom(body).map((privateKey, index) => {
+    const wallet = walletFromPrivateKey(privateKey);
+    const metadata = namesByAddress.get(wallet.address.toLowerCase());
+    return {
+      id: metadata?.id || crypto.randomUUID(),
+      name: String(metadata?.name || `Wallet ${index + 1}`).slice(0, 80),
+      address: wallet.address,
+      privateKey: wallet.privateKey,
+      status: "queued" as const,
+    };
+  });
+}
+
 function schedulerPublic(job: SchedulerJob) {
   return {
     id: job.id,
@@ -2055,6 +2104,18 @@ function schedulerPublic(job: SchedulerJob) {
     openSeaKeySource: job.openSea?.keySource,
     armAttempts: job.armAttempts,
     walletCount: job.walletCount,
+    wallets: job.wallets.map((wallet) => ({
+      id: wallet.id,
+      name: wallet.name,
+      address: wallet.address,
+      status: wallet.status,
+      txHash: wallet.txHash,
+      acceptedBy: wallet.acceptedBy,
+      acceptedAt: wallet.acceptedAt,
+      submissionLatencyMs: wallet.submissionLatencyMs,
+      targetOffsetMs: wallet.targetOffsetMs,
+      error: wallet.error,
+    })),
     targetTime: job.targetTime ? new Date(job.targetTime).toISOString() : undefined,
     targetBlock: job.targetBlock,
     createdAt: job.createdAt,
@@ -2062,6 +2123,112 @@ function schedulerPublic(job: SchedulerJob) {
     result: job.result,
     error: job.error,
   };
+}
+
+function schedulerStoragePayload(job: SchedulerJob): string {
+  const { arming: _arming, ...payload } = job;
+  return JSON.stringify(payload, (_key, value) => (typeof value === "bigint" ? value.toString() : value));
+}
+
+function persistSchedulerJob(job: SchedulerJob) {
+  if (job.deleted) return;
+  const payloadCipher = encryptRequiredSecret(schedulerStoragePayload(job));
+  database()
+    .prepare(
+      `INSERT INTO scheduler_jobs
+       (id, address_key, status, target_time, target_block, chain_key, payload_cipher, error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         status = excluded.status,
+         target_time = excluded.target_time,
+         target_block = excluded.target_block,
+         chain_key = excluded.chain_key,
+         payload_cipher = excluded.payload_cipher,
+         error = excluded.error,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      job.id,
+      job.ownerAddressKey,
+      job.status,
+      job.targetTime ?? null,
+      job.targetBlock ?? null,
+      job.chain.key,
+      payloadCipher,
+      job.error ?? null,
+      job.createdAt,
+      job.updatedAt,
+    );
+}
+
+export function restoreSchedulerJobs() {
+  const rows = database()
+    .prepare("SELECT id, status, payload_cipher FROM scheduler_jobs WHERE status IN ('pending', 'paused', 'running')")
+    .all() as Array<{ id: string; status: SchedulerJobStatus; payload_cipher: string }>;
+  const now = Date.now();
+  for (const row of rows) {
+    try {
+      const stored = JSON.parse(decryptRequiredSecret(row.payload_cipher)) as SchedulerJob & {
+        chain: { key?: string; chainId?: number };
+      };
+      const chain = resolveChain(stored.chain?.key || stored.chain?.chainId);
+      if (!chain || !stored.ownerAddressKey || !Array.isArray(stored.wallets)) {
+        throw new Error("Persisted scheduler job is incomplete");
+      }
+      const job: SchedulerJob = {
+        ...stored,
+        chain,
+        plan: stored.plan
+          ? {
+              ...stored.plan,
+              value: BigInt(stored.plan.value),
+            }
+          : undefined,
+        endpoints: rpcUrlsFor(chain),
+        arming: undefined,
+        warmed: false,
+        lastBlockPollAt: 0,
+        recoveredAfterRestart: true,
+      };
+      if (row.status === "running") {
+        job.status = "failed";
+        job.error = "Server restarted while this job was running; it was not replayed to prevent a duplicate mint";
+        job.wallets.forEach((wallet) => {
+          if (!["completed", "failed"].includes(wallet.status)) wallet.status = "failed";
+          wallet.privateKey = "";
+          wallet.signedTransaction = undefined;
+        });
+        if (job.openSea) job.openSea.apiKey = "";
+        job.updatedAt = new Date().toISOString();
+        persistSchedulerJob(job);
+        continue;
+      }
+      if (job.status === "pending" && job.targetTime !== undefined && job.targetTime <= now) {
+        job.status = "failed";
+        job.error = "Scheduled target passed while the server was offline; no late transaction was broadcast";
+        job.wallets.forEach((wallet) => {
+          wallet.status = "failed";
+          wallet.privateKey = "";
+          wallet.signedTransaction = undefined;
+        });
+        if (job.openSea) job.openSea.apiKey = "";
+        job.updatedAt = new Date().toISOString();
+        persistSchedulerJob(job);
+        continue;
+      }
+      schedulerJobs.set(job.id, job);
+    } catch (error) {
+      logServerError("scheduler-restore", error, { jobId: row.id });
+      database()
+        .prepare("UPDATE scheduler_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
+        .run("Persisted scheduler job could not be restored", new Date().toISOString(), row.id);
+    }
+  }
+}
+
+export function clearSchedulerMemoryForTest() {
+  if (process.env.NODE_ENV !== "test") throw new Error("Scheduler test reset is available only in test mode");
+  schedulerJobs.clear();
 }
 
 async function validateScheduledOpenSeaSource(
@@ -2145,34 +2312,80 @@ async function scheduledOpenSeaTransaction(job: SchedulerJob, privateKey: string
   return signTransactionPayload(signable, privateKey, job.chain, job.endpoints);
 }
 
+export function runIsolatedSchedulerTasks<T, R>(
+  items: T[],
+  operation: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  return Promise.allSettled(items.map((item, index) => operation(item, index)));
+}
+
 async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> {
-  if (job.signedTransactions || job.arming || !["pending", "running"].includes(job.status)) return;
+  if (job.arming || !["pending", "running"].includes(job.status)) return;
   if (!force && job.nextArmAttemptAt > Date.now()) return;
+  const candidates = job.wallets.filter(
+    (wallet) =>
+      !wallet.signedTransaction &&
+      !["completed", "broadcasting", "stopped"].includes(wallet.status) &&
+      Boolean(wallet.privateKey),
+  );
+  if (!candidates.length) return;
   job.armAttempts += 1;
+  candidates.forEach((wallet) => {
+    wallet.status = "preparing";
+    wallet.error = undefined;
+  });
+  job.updatedAt = new Date().toISOString();
+  persistSchedulerJob(job);
   job.arming = (async () => {
-    const signedTransactions = job.openSea
-      ? await Promise.all(job.privateKeys.map((key) => scheduledOpenSeaTransaction(job, key)))
-      : await Promise.all(
-          job.privateKeys.map((key) => {
-            if (!job.plan) throw new Error("Scheduled on-chain mint plan is unavailable");
-            return signTransactionPayload(
-              {
-                to: job.plan.to,
-                data: job.plan.data,
-                value: job.plan.value.toString(),
-                chainId: job.chain.chainId,
-              },
-              key,
-              job.chain,
-              job.endpoints,
-            );
-          }),
-        );
-    if (["pending", "running"].includes(job.status)) {
-      job.signedTransactions = signedTransactions;
-      job.error = undefined;
-      job.nextArmAttemptAt = 0;
+    const settled = await runIsolatedSchedulerTasks(
+      candidates,
+      async (wallet) => {
+        const signedTransaction = job.openSea
+          ? await scheduledOpenSeaTransaction(job, wallet.privateKey)
+          : await (async () => {
+              if (!job.plan) throw new Error("Scheduled on-chain mint plan is unavailable");
+              return signTransactionPayload(
+                {
+                  to: job.plan.to,
+                  data: job.plan.data,
+                  value: job.plan.value.toString(),
+                  chainId: job.chain.chainId,
+                },
+                wallet.privateKey,
+                job.chain,
+                job.endpoints,
+              );
+            })();
+        return { wallet, signedTransaction };
+      },
+    );
+    if (job.deleted) return;
+    if (job.stopRequested || job.status === "stopped") {
+      candidates.forEach((wallet) => {
+        wallet.status = "stopped";
+        wallet.signedTransaction = undefined;
+      });
+      job.updatedAt = new Date().toISOString();
+      persistSchedulerJob(job);
+      return;
     }
+    settled.forEach((result, index) => {
+      const wallet = candidates[index];
+      if (result.status === "fulfilled") {
+        wallet.signedTransaction = result.value.signedTransaction;
+        wallet.status = "ready";
+        wallet.error = undefined;
+      } else {
+        wallet.status = "failed";
+        wallet.error = errorMessage(result.reason).slice(0, 300);
+      }
+    });
+    const ready = job.wallets.filter((wallet) => wallet.status === "ready").length;
+    const failed = job.wallets.filter((wallet) => wallet.status === "failed").length;
+    job.error = failed ? `${failed} wallet(s) could not be prepared; ${ready} wallet(s) are ready` : undefined;
+    job.nextArmAttemptAt = failed ? Date.now() + (job.openSea ? 1_000 : 500) : 0;
+    job.updatedAt = new Date().toISOString();
+    persistSchedulerJob(job);
   })();
   try {
     await job.arming;
@@ -2184,6 +2397,7 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
       chain: job.chain.key,
       walletCount: job.walletCount,
     });
+    persistSchedulerJob(job);
   } finally {
     job.arming = undefined;
   }
@@ -2193,6 +2407,7 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
   if (job.status !== "pending") return;
   job.status = "running";
   job.updatedAt = new Date().toISOString();
+  persistSchedulerJob(job);
   try {
     if (job.arming) {
       const activeArming = job.arming;
@@ -2203,16 +2418,54 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
       }
       if (job.arming === activeArming) job.arming = undefined;
     }
-    if (!job.signedTransactions) await armSchedulerJob(job, true);
-    if (!job.signedTransactions) throw new Error(job.error || "Unable to sign scheduled transactions");
-    const results = await Promise.all(
-      job.signedTransactions.map((signedTx) =>
-        broadcastSignedTransaction(signedTx, job.chain, job.endpoints),
-      ),
+    await armSchedulerJob(job, true);
+    if (job.stopRequested) {
+      job.status = "stopped";
+      job.wallets.forEach((wallet) => {
+        if (!["completed", "failed"].includes(wallet.status)) wallet.status = "stopped";
+      });
+      return;
+    }
+    const readyWallets = job.wallets.filter(
+      (wallet) => wallet.status === "ready" && Boolean(wallet.signedTransaction),
     );
-    job.result = { transactions: results, txHashes: results.map((result) => result.txHash) };
-    job.error = undefined;
-    job.status = "completed";
+    if (!readyWallets.length) throw new Error(job.error || "No scheduled wallet could be prepared");
+    readyWallets.forEach((wallet) => (wallet.status = "broadcasting"));
+    persistSchedulerJob(job);
+    const settled = await runIsolatedSchedulerTasks(
+      readyWallets,
+      (wallet) => broadcastSignedTransaction(wallet.signedTransaction!, job.chain, job.endpoints),
+    );
+    settled.forEach((result, index) => {
+      const wallet = readyWallets[index];
+      if (result.status === "fulfilled") {
+        wallet.status = "completed";
+        wallet.txHash = result.value.txHash;
+        wallet.acceptedBy = result.value.acceptedBy;
+        wallet.acceptedAt = result.value.acceptedAt;
+        wallet.submissionLatencyMs = result.value.submissionLatencyMs;
+        wallet.targetOffsetMs = job.targetTime === undefined ? undefined : Date.parse(result.value.acceptedAt) - job.targetTime;
+        wallet.error = undefined;
+      } else {
+        wallet.status = "failed";
+        wallet.error = errorMessage(result.reason).slice(0, 300);
+      }
+    });
+    const completed = job.wallets.filter((wallet) => wallet.status === "completed");
+    const failed = job.wallets.filter((wallet) => wallet.status === "failed");
+    job.result = {
+      txHashes: completed.map((wallet) => wallet.txHash),
+      completed: completed.length,
+      failed: failed.length,
+      timing: completed.map((wallet) => ({
+        address: wallet.address,
+        acceptedBy: wallet.acceptedBy,
+        submissionLatencyMs: wallet.submissionLatencyMs,
+        targetOffsetMs: wallet.targetOffsetMs,
+      })),
+    };
+    job.error = failed.length ? `${failed.length} wallet(s) failed; ${completed.length} wallet(s) broadcast successfully` : undefined;
+    job.status = completed.length ? "completed" : "failed";
   } catch (error) {
     job.error = errorMessage(error).slice(0, 500);
     job.status = "failed";
@@ -2222,10 +2475,13 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
       walletCount: job.walletCount,
     });
   } finally {
-    job.privateKeys = [];
-    job.signedTransactions = undefined;
+    job.wallets.forEach((wallet) => {
+      wallet.privateKey = "";
+      wallet.signedTransaction = undefined;
+    });
     if (job.openSea) job.openSea.apiKey = "";
     job.updatedAt = new Date().toISOString();
+    persistSchedulerJob(job);
   }
 }
 
@@ -2263,7 +2519,24 @@ async function schedulerTick() {
             void warmRpcEndpoints(job);
             void armSchedulerJob(job);
           }
-          if (currentBlock >= job.targetBlock) void executeSchedulerJob(job);
+          if (currentBlock >= job.targetBlock) {
+            if (job.recoveredAfterRestart) {
+              job.status = "failed";
+              job.error = "Target block passed while the server was offline; no late transaction was broadcast";
+              job.wallets.forEach((wallet) => {
+                wallet.status = "failed";
+                wallet.privateKey = "";
+                wallet.signedTransaction = undefined;
+              });
+              if (job.openSea) job.openSea.apiKey = "";
+              job.updatedAt = new Date().toISOString();
+              persistSchedulerJob(job);
+            } else {
+              void executeSchedulerJob(job);
+            }
+          } else if (currentBlock < job.targetBlock) {
+            job.recoveredAfterRestart = false;
+          }
         } catch (error) {
           if (IS_DEVELOPMENT) {
             logServerError("scheduler-block-poll", error, {
@@ -2400,6 +2673,29 @@ function decryptConfigSecret(value: Record<string, JsonConfig>): string {
   }
 }
 
+function encryptRequiredSecret(value: string): string {
+  const encrypted = encryptConfigSecret(value);
+  if (!encrypted || typeof encrypted !== "object" || Array.isArray(encrypted)) {
+    throw new ApiError(503, "Encrypted persistence requires CONFIG_ENCRYPTION_KEY or SESSION_SECRET");
+  }
+  return JSON.stringify(encrypted);
+}
+
+function decryptRequiredSecret(value: string): string {
+  let parsed: JsonConfig;
+  try {
+    parsed = JSON.parse(value) as JsonConfig;
+  } catch {
+    throw new Error("Encrypted database value is malformed");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Encrypted database value is invalid");
+  }
+  const decrypted = decryptConfigSecret(parsed as Record<string, JsonConfig>);
+  if (!decrypted) throw new Error("Encrypted database value could not be decrypted");
+  return decrypted;
+}
+
 function sanitizeConfigValue(value: unknown, key = "", depth = 0): JsonConfig | undefined {
   if (BLOCKED_CONFIG_KEY.test(key)) return undefined;
   if (ENCRYPTED_CONFIG_KEY.test(key)) {
@@ -2462,6 +2758,35 @@ function database(): DatabaseSync {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS user_wallets (
+      id TEXT PRIMARY KEY,
+      address_key TEXT NOT NULL REFERENCES users(address_key) ON DELETE CASCADE,
+      wallet_name TEXT NOT NULL,
+      wallet_address TEXT NOT NULL,
+      private_key_cipher TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(address_key, wallet_address)
+    );
+
+    CREATE TABLE IF NOT EXISTS scheduler_jobs (
+      id TEXT PRIMARY KEY,
+      address_key TEXT NOT NULL REFERENCES users(address_key) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      target_time INTEGER,
+      target_block INTEGER,
+      chain_key TEXT NOT NULL,
+      payload_cipher TEXT NOT NULL,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS scheduler_jobs_owner_created
+      ON scheduler_jobs(address_key, created_at DESC);
+    CREATE INDEX IF NOT EXISTS scheduler_jobs_status_target
+      ON scheduler_jobs(status, target_time);
   `);
   try {
     chmodSync(DATABASE_PATH, 0o600);
@@ -2527,6 +2852,85 @@ function writeUserConfig(session: AuthenticatedSession, input: unknown) {
     )
     .run(session.addressKey, serialized, now, now);
   return { config: decryptConfigValue(config), updatedAt: now };
+}
+
+interface PersistedExecutionWallet {
+  id: string;
+  name: string;
+  address: string;
+  privateKey: string;
+}
+
+function readUserWallets(session: AuthenticatedSession): PersistedExecutionWallet[] {
+  upsertUser(session.address, session.chainId);
+  const rows = database()
+    .prepare(
+      "SELECT id, wallet_name, wallet_address, private_key_cipher FROM user_wallets WHERE address_key = ? ORDER BY created_at ASC",
+    )
+    .all(session.addressKey) as Array<{
+      id: string;
+      wallet_name: string;
+      wallet_address: string;
+      private_key_cipher: string;
+    }>;
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.wallet_name,
+    address: getAddress(row.wallet_address),
+    privateKey: decryptRequiredSecret(row.private_key_cipher),
+  }));
+}
+
+function writeUserWallets(session: AuthenticatedSession, input: unknown): PersistedExecutionWallet[] {
+  if (!Array.isArray(input)) throw new ApiError(400, "wallets must be an array");
+  if (input.length > MAX_WALLETS) throw new ApiError(400, `A maximum of ${MAX_WALLETS} wallets is allowed`);
+  upsertUser(session.address, session.chainId);
+  const seen = new Set<string>();
+  const wallets = input.map((item, index) => {
+    if (!item || typeof item !== "object") throw new ApiError(400, `wallets[${index}] is invalid`);
+    const record = item as Record<string, unknown>;
+    const wallet = walletFromPrivateKey(record.privateKey);
+    const addressKey = wallet.address.toLowerCase();
+    if (seen.has(addressKey)) throw new ApiError(400, `wallets[${index}] duplicates another wallet`);
+    seen.add(addressKey);
+    const suppliedAddress = record.address ? requireAddress(record.address, `wallets[${index}].address`) : wallet.address;
+    if (suppliedAddress.toLowerCase() !== addressKey) {
+      throw new ApiError(400, `wallets[${index}] private key does not match its address`);
+    }
+    return {
+      id: typeof record.id === "string" && /^[a-zA-Z0-9-]{8,80}$/.test(record.id) ? record.id : crypto.randomUUID(),
+      name: String(record.name || `Wallet ${index + 1}`).trim().slice(0, 80) || `Wallet ${index + 1}`,
+      address: wallet.address,
+      privateKey: wallet.privateKey,
+    };
+  });
+  const db = database();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("DELETE FROM user_wallets WHERE address_key = ?").run(session.addressKey);
+    const insert = db.prepare(
+      `INSERT INTO user_wallets
+       (id, address_key, wallet_name, wallet_address, private_key_cipher, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const now = new Date().toISOString();
+    for (const wallet of wallets) {
+      insert.run(
+        wallet.id,
+        session.addressKey,
+        wallet.name,
+        wallet.address,
+        encryptRequiredSecret(wallet.privateKey),
+        now,
+        now,
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return wallets;
 }
 
 const NATIVE_TRANSFER_GAS_LIMIT = 21_000n;
@@ -2931,6 +3335,26 @@ app.put(
     const config = writeUserConfig(session, req.body?.config ?? {});
     res.setHeader("Cache-Control", "no-store");
     res.json({ success: true, address: session.address, ...config });
+  }),
+);
+
+app.get(
+  "/api/user/wallets",
+  asyncRoute(async (req, res) => {
+    const session = requireSession(req);
+    const wallets = readUserWallets(session);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, wallets, count: wallets.length });
+  }),
+);
+
+app.put(
+  "/api/user/wallets",
+  asyncRoute(async (req, res) => {
+    const session = requireSession(req);
+    const wallets = writeUserWallets(session, req.body?.wallets);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, wallets, count: wallets.length });
   }),
 );
 
@@ -3651,6 +4075,7 @@ app.get(
 app.post(
   "/api/scheduler/create",
   asyncRoute(async (req, res) => {
+    const session = requireSession(req);
     const body = (req.body || {}) as Record<string, any>;
     const targetTime = parseTargetTime(body.targetTime);
     const targetBlock =
@@ -3664,7 +4089,7 @@ app.post(
     if (targetBlock !== undefined && !Number.isSafeInteger(targetBlock)) {
       throw new ApiError(400, "targetBlock must be a safe integer");
     }
-    const privateKeys = privateKeysFrom(body);
+    const wallets = schedulerWalletsFrom(body);
     const requestedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
     let chain: ChainConfig;
     let endpoints: string[];
@@ -3708,6 +4133,7 @@ app.post(
     const now = new Date().toISOString();
     const job: SchedulerJob = {
       id: crypto.randomUUID(),
+      ownerAddressKey: session.addressKey,
       status: "pending",
       createdAt: now,
       updatedAt: now,
@@ -3720,36 +4146,141 @@ app.post(
       mode,
       quantity,
       openSea,
-      privateKeys,
-      walletCount: privateKeys.length,
+      wallets,
+      walletCount: wallets.length,
       nextArmAttemptAt: 0,
       armAttempts: 0,
       warmed: false,
       lastBlockPollAt: 0,
     };
     schedulerJobs.set(job.id, job);
+    persistSchedulerJob(job);
     res.status(201).json({ success: true, ...schedulerPublic(job) });
   }),
 );
 
-app.get("/api/scheduler/jobs", (_req, res) => {
-  const jobs = [...schedulerJobs.values()]
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-    .map(schedulerPublic);
+app.get("/api/scheduler/jobs", (req, res) => {
+  const session = requireSession(req);
+  const rows = database()
+    .prepare("SELECT id, payload_cipher FROM scheduler_jobs WHERE address_key = ? ORDER BY created_at DESC")
+    .all(session.addressKey) as Array<{ id: string; payload_cipher: string }>;
+  const jobs = rows.flatMap((row) => {
+    const active = schedulerJobs.get(row.id);
+    if (active) return [schedulerPublic(active)];
+    try {
+      const stored = JSON.parse(decryptRequiredSecret(row.payload_cipher)) as SchedulerJob;
+      const chain = resolveChain(stored.chain?.key || stored.chain?.chainId);
+      if (!chain) return [];
+      const job: SchedulerJob = {
+        ...stored,
+        chain,
+        plan: stored.plan ? { ...stored.plan, value: BigInt(stored.plan.value) } : undefined,
+        endpoints: [],
+        arming: undefined,
+      };
+      return [schedulerPublic(job)];
+    } catch (error) {
+      logServerError("scheduler-list", error, { jobId: row.id, address: session.address });
+      return [];
+    }
+  });
+  res.setHeader("Cache-Control", "no-store");
   res.json({ jobs, count: jobs.length });
 });
 
-app.delete("/api/scheduler/jobs/:id", (req, res) => {
+function ownedActiveSchedulerJob(req: Request): { session: AuthenticatedSession; job: SchedulerJob } {
+  const session = requireSession(req);
   const job = schedulerJobs.get(req.params.id);
-  if (!job) throw new ApiError(404, "Scheduler job not found");
-  if (job.status !== "pending") {
-    throw new ApiError(409, `Only pending jobs can be cancelled (current status: ${job.status})`);
+  if (!job || job.ownerAddressKey !== session.addressKey) throw new ApiError(404, "Scheduler job not found");
+  return { session, job };
+}
+
+app.post("/api/scheduler/jobs/:id/pause", (req, res) => {
+  const { job } = ownedActiveSchedulerJob(req);
+  if (job.status !== "pending") throw new ApiError(409, `Only queued jobs can be paused (current status: ${job.status})`);
+  job.status = "paused";
+  job.updatedAt = new Date().toISOString();
+  persistSchedulerJob(job);
+  res.json({ success: true, job: schedulerPublic(job) });
+});
+
+app.post("/api/scheduler/jobs/:id/resume", (req, res) => {
+  const { job } = ownedActiveSchedulerJob(req);
+  if (job.status !== "paused") throw new ApiError(409, `Only paused jobs can be resumed (current status: ${job.status})`);
+  if (job.targetTime !== undefined && job.targetTime <= Date.now() + 250) {
+    throw new ApiError(409, "The target time has passed; delete this job and create a new schedule");
   }
-  job.status = "cancelled";
-  job.privateKeys = [];
-  job.signedTransactions = undefined;
+  job.status = "pending";
+  job.error = undefined;
+  job.updatedAt = new Date().toISOString();
+  persistSchedulerJob(job);
+  res.json({ success: true, job: schedulerPublic(job) });
+});
+
+app.post("/api/scheduler/jobs/:id/stop", (req, res) => {
+  const { job } = ownedActiveSchedulerJob(req);
+  if (!["pending", "paused", "running"].includes(job.status)) {
+    throw new ApiError(409, `Job cannot be stopped from ${job.status}`);
+  }
+  job.stopRequested = true;
+  if (job.status !== "running") {
+    job.status = "stopped";
+    job.wallets.forEach((wallet) => {
+      wallet.status = "stopped";
+      wallet.privateKey = "";
+      wallet.signedTransaction = undefined;
+    });
+    if (job.openSea) job.openSea.apiKey = "";
+    schedulerJobs.delete(job.id);
+  }
+  job.updatedAt = new Date().toISOString();
+  persistSchedulerJob(job);
+  res.json({
+    success: true,
+    job: schedulerPublic(job),
+    warning: job.status === "running" ? "Stop requested; already-submitted blockchain transactions cannot be recalled" : undefined,
+  });
+});
+
+app.delete("/api/scheduler/jobs/:id", (req, res) => {
+  const session = requireSession(req);
+  const active = schedulerJobs.get(req.params.id);
+  if (active?.ownerAddressKey !== session.addressKey) {
+    const owned = database()
+      .prepare("SELECT id FROM scheduler_jobs WHERE id = ? AND address_key = ?")
+      .get(req.params.id, session.addressKey);
+    if (!owned) throw new ApiError(404, "Scheduler job not found");
+  }
+  if (active?.status === "running") throw new ApiError(409, "A running job must finish or stop before deletion");
+  if (active) {
+    active.deleted = true;
+    active.stopRequested = true;
+    active.wallets.forEach((wallet) => {
+      wallet.privateKey = "";
+      wallet.signedTransaction = undefined;
+    });
+    if (active.openSea) active.openSea.apiKey = "";
+    schedulerJobs.delete(active.id);
+  }
+  database().prepare("DELETE FROM scheduler_jobs WHERE id = ? AND address_key = ?").run(req.params.id, session.addressKey);
+  res.json({ success: true, deleted: req.params.id });
+});
+
+app.delete("/api/scheduler/jobs/:id/cancel", (req, res) => {
+  const { job } = ownedActiveSchedulerJob(req);
+  if (!["pending", "paused"].includes(job.status)) {
+    throw new ApiError(409, `Only queued or paused jobs can be cancelled (current status: ${job.status})`);
+  }
+  job.status = "stopped";
+  job.wallets.forEach((wallet) => {
+    wallet.status = "stopped";
+    wallet.privateKey = "";
+    wallet.signedTransaction = undefined;
+  });
   if (job.openSea) job.openSea.apiKey = "";
   job.updatedAt = new Date().toISOString();
+  schedulerJobs.delete(job.id);
+  persistSchedulerJob(job);
   res.json({ success: true, job: schedulerPublic(job) });
 });
 
@@ -3802,6 +4333,7 @@ export async function startServer() {
   serverStarted = true;
   installProcessErrorLogging();
   database();
+  restoreSchedulerJobs();
   await installFrontend();
   await new Promise<void>((resolve, reject) => {
     activeHttpServer = app.listen(PORT, HOST);

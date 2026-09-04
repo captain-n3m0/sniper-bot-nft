@@ -10,8 +10,10 @@
     "preview": "vite preview",
     "testnet:deploy": "node --import tsx scripts/deploy-sepolia-test.ts",
     "testnet:verify": "node --import tsx scripts/verify-sepolia-sniper.ts",
+    "benchmark:scheduler": "node --import tsx scripts/benchmark-scheduler.ts",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
@@ -37,5 +39,9 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "overrides": {
+    "qs": "6.16.0",
+    "tmp": "0.2.7"
   }
 }

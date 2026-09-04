@@ -139,7 +139,7 @@ export const Documentation = () => {
               <div className="grid grid-cols-3 border-t border-white/5 px-4 py-4"><span className="text-white">Login wallet</span><span>SIWE authentication</span><span className="text-synapse-emerald">Address only</span></div>
               <div className="grid grid-cols-3 border-t border-white/5 px-4 py-4"><span className="text-white">Execution wallet</span><span>Minting and funding</span><span className="text-synapse-emerald">Private key excluded</span></div>
             </div>
-            <p>Execution wallets live in the current browser session’s application memory. Reloading or closing the session clears them, so they must be imported again. Wallet names and keys are not synchronized to the user-config database.</p>
+            <p>Execution wallets are scoped to the SIWE login account and stored in the server database with AES-256-GCM encryption. They are restored after signing back in on another session. The login wallet remains authentication-only and is never added as an execution wallet automatically.</p>
             <div className="rounded-2xl border border-white/5 bg-black/40 p-5 font-mono text-xs leading-6 text-neutral-400"><span className="text-neutral-600">// Plain JSON bulk-import shape</span><br />{`{"wallets":[{"name":"Wallet 1","privateKey":"0x..."}]}`}</div>
             <Callout type="warning" title="Treat plaintext JSON as highly sensitive">Prefer encrypted Ethereum V3 keystores. Never upload wallet files to chat, cloud storage, or unknown websites, and only fund execution wallets with the amount required for the intended mint.</Callout>
           </DocSection>
@@ -191,12 +191,12 @@ export const Documentation = () => {
           </DocSection>
 
           <DocSection id="scheduler" eyebrow="08 / Automation" title="Scheduling a mint">
-            <p>The scheduler accepts an exact ISO timestamp or target block and can prepare transactions for multiple execution wallets. The internal loop checks time every 100 milliseconds, warms RPC connections near execution, and signs shortly before the target.</p>
+            <p>The scheduler accepts an exact ISO timestamp or target block and prepares every execution wallet independently. The internal loop checks time every 100 milliseconds, warms RPC connections near execution, and signs shortly before the target. A failed OpenSea action for one wallet does not block wallets that are ready.</p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <Feature icon={CalendarClock} title="Target time">Use the drop’s authoritative start time. Confirm the timezone before saving the job.</Feature>
               <Feature icon={Gauge} title="Target block">Useful when activation is defined by block height rather than a wall-clock timestamp.</Feature>
             </div>
-            <Callout title="Server process requirement">Scheduled jobs currently live in server memory. They survive browser closure but not an application restart or deployment. Recheck the Jobs list before every scheduled mint.</Callout>
+            <Callout title="Durable, account-scoped jobs">Queued and paused jobs are encrypted in SQLite and restored after application restarts or deployments. Jobs that were actively broadcasting during a crash are marked failed instead of replayed, preventing accidental duplicate mints. Use the job panel to pause, resume, stop, or delete your own jobs.</Callout>
           </DocSection>
 
           <DocSection id="networks" eyebrow="09 / Chains" title="Supported networks">
@@ -220,8 +220,8 @@ export const Documentation = () => {
           <DocSection id="security" eyebrow="11 / Safety" title="Security model">
             <div className="space-y-3">
               <Callout type="success" title="Wallet separation">SIWE login proves account ownership but never authorizes minting. Execution keys must be imported separately.</Callout>
-              <Callout type="success" title="Database filtering">Private keys, wallet arrays, mnemonics, signatures, salts, signed transactions, passwords, and session tokens are blocked from user-config persistence.</Callout>
-              <Callout type="success" title="Encrypted configuration">Saved API-key fields are encrypted at rest with AES-256-GCM using the server’s dedicated configuration key.</Callout>
+              <Callout type="success" title="Separated encrypted storage">Execution-wallet keys are stored only in the dedicated wallet vault; API keys and scheduler payloads use separate encrypted records. Session tokens are never persisted in the database.</Callout>
+              <Callout type="success" title="Encrypted secrets">Execution private keys, OpenSea keys, and durable scheduler payloads are encrypted at rest with AES-256-GCM using the server’s dedicated configuration key.</Callout>
               <Callout type="success" title="Redacted logs">Sensitive request fields are removed from development server error logs.</Callout>
             </div>
             <p>Because execution wallets sign server-prepared transactions, operate MintGrid only over HTTPS and on infrastructure you control. Use dedicated low-balance mint wallets rather than primary treasury wallets.</p>

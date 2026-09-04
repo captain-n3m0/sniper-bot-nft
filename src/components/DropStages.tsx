@@ -7,6 +7,8 @@ interface DropStagesProps {
   wallets: StoredWallet[];
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
+  openSeaApiKey?: string;
+  onOpenSeaApiKeyChange?: (value: string) => void;
   onDetectedChain?: (chain: string) => void;
   onSelectStageForSniper?: (
     contractAddress: string,
@@ -64,6 +66,8 @@ export const DropStages = ({
   wallets,
   addLog,
   selectedChain,
+  openSeaApiKey,
+  onOpenSeaApiKeyChange,
   onDetectedChain,
   onSelectStageForSniper,
   onSelectStageForScheduler
@@ -90,6 +94,10 @@ export const DropStages = ({
   }>({});
 
   const [currentTime, setCurrentTime] = useState<number>(Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    if (typeof openSeaApiKey === 'string' && openSeaApiKey !== apiKey) setApiKey(openSeaApiKey);
+  }, [openSeaApiKey]);
 
   // Ticker for live countdown
   useEffect(() => {
@@ -374,7 +382,10 @@ export const DropStages = ({
             <input
               type="password"
               value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                onOpenSeaApiKeyChange?.(e.target.value);
+              }}
               className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
               placeholder="Your OpenSea API Key"
             />
