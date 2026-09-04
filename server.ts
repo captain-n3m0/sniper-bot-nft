@@ -387,6 +387,9 @@ interface RpcHealth {
 
 const rpcHealth = new Map<string, RpcHealth>();
 const providerCache = new Map<string, JsonRpcProvider>();
+const metricsProbeByClient = new Map<string, number>();
+let metricsProbeInFlight = false;
+const METRICS_PROBE_COOLDOWN_MS = 60_000;
 
 function healthFor(url: string): RpcHealth {
   const health = rpcHealth.get(url) || {
@@ -3228,7 +3231,22 @@ app.get("/api/health", (_req, res) => {
 
 app.post(
   "/api/metrics/probe",
-  asyncRoute(async (_req, res) => {
+  asyncRoute(async (req, res) => {
+    const clientKey = req.ip || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const nextAllowedAt = metricsProbeByClient.get(clientKey) || 0;
+    if (nextAllowedAt > now) {
+      const retryAfter = Math.ceil((nextAllowedAt - now) / 1_000);
+      res.setHeader("Retry-After", String(retryAfter));
+      throw new ApiError(429, `RPC probe is rate-limited; retry in ${retryAfter}s`);
+    }
+    if (metricsProbeInFlight) {
+      res.setHeader("Retry-After", "10");
+      throw new ApiError(429, "An RPC probe is already running; retry shortly");
+    }
+    metricsProbeByClient.set(clientKey, now + METRICS_PROBE_COOLDOWN_MS);
+    metricsProbeInFlight = true;
+    try {
     const results = await Promise.all(
       CHAINS.map(async (chain) => {
         try {
@@ -3246,6 +3264,9 @@ app.post(
       }),
     );
     res.json({ success: true, results });
+    } finally {
+      metricsProbeInFlight = false;
+    }
   }),
 );
 

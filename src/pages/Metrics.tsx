@@ -58,7 +58,6 @@ export const Metrics = () => {
   const [data, setData] = useState<MetricsPayload | null>(null);
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
-  const [probing, setProbing] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -78,31 +77,14 @@ export const Metrics = () => {
         if (active) setRefreshing(false);
       }
     };
-    void load();
+    // Seed the RPC cards with one lightweight block-number probe on page load.
+    void fetch('/api/metrics/probe', { method: 'POST' }).finally(() => void load());
     const timer = setInterval(() => void load(), 5_000);
     return () => {
       active = false;
       clearInterval(timer);
     };
   }, []);
-
-  const probeRpc = async () => {
-    setProbing(true);
-    try {
-      const response = await fetch('/api/metrics/probe', { method: 'POST' });
-      const payload = await response.json();
-      if (!response.ok || !payload.success) throw new Error(payload.error || 'RPC probe failed');
-      const refresh = await fetch('/api/metrics');
-      const refreshed = await refresh.json();
-      if (!refresh.ok) throw new Error(refreshed.error || 'Metrics refresh failed');
-      setData(refreshed);
-      setError('');
-    } catch (probeError) {
-      setError(probeError instanceof Error ? probeError.message : 'RPC probe failed');
-    } finally {
-      setProbing(false);
-    }
-  };
 
   const requestSeries = useMemo(() => data?.series.map((point) => point.requests) || [], [data]);
   const latencySeries = useMemo(() => data?.series.map((point) => point.averageLatencyMs) || [], [data]);
@@ -117,12 +99,9 @@ export const Metrics = () => {
             <h1 className="font-serif text-5xl md:text-7xl">Platform Metrics</h1>
             <p className="mt-4 max-w-2xl text-neutral-400">Real-time operational telemetry from the current LastLap MintGrid server deployment. Request graphs cover the latest rolling 60 minutes.</p>
           </div>
-          <div className="flex flex-wrap items-center gap-3 font-mono text-xs text-neutral-500">
+          <div className="flex items-center gap-2 font-mono text-xs text-neutral-500">
             <RefreshCw size={13} className={refreshing ? 'animate-spin text-synapse-cyan' : ''} />
             Refreshes every 5 seconds
-            <button type="button" onClick={() => void probeRpc()} disabled={probing} className="rounded-lg border border-synapse-cyan/30 px-3 py-2 text-synapse-cyan transition-colors hover:bg-synapse-cyan/10 disabled:opacity-50">
-              {probing ? 'Probing RPCs…' : 'Probe all RPCs'}
-            </button>
           </div>
         </div>
 
