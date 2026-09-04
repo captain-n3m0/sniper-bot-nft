@@ -4010,6 +4010,7 @@ app.post(
         // stage must never be shown as currently eligible. OpenSea also reports
         // these wallets as not eligible until the stage is live.
         eligible: [],
+        projectedEligible: checks.filter((item) => item.eligible).map((item) => item.address),
         warnings: [],
         notEligible: checks
           .filter((item) => !item.eligible)

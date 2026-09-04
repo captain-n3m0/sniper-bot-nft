@@ -85,6 +85,7 @@ export const DropStages = ({
   const [simulationResults, setSimulationResults] = useState<{
     [stageId: string]: {
       eligible: string[];
+      projectedEligible?: string[];
       notEligible: { address: string; reason: string }[];
       unknown?: { address: string; reason: string }[];
       warnings?: { address: string; reason: string }[];
@@ -694,6 +695,23 @@ export const DropStages = ({
                                 )}
                               </div>
                             </div>
+
+                            {(result.projectedEligible?.length || 0) > 0 && (
+                              <div className="rounded-xl border border-synapse-violet/20 bg-synapse-violet/5 p-3 md:col-span-2">
+                                <div className="mb-2 flex items-center gap-2 text-synapse-violet">
+                                  <Clock size={14} />
+                                  <span className="font-mono text-xs font-bold uppercase tracking-widest">
+                                    Projected Eligible When Live ({result.projectedEligible.length})
+                                  </span>
+                                </div>
+                                <p className="mb-2 text-[10px] text-neutral-400">Public-stage configuration and current wallet limits pass. Recheck once the stage is live; this is not OpenSea confirmation.</p>
+                                <div className="max-h-24 space-y-1 overflow-y-auto custom-scrollbar">
+                                  {result.projectedEligible.map((addr) => (
+                                    <div key={addr} className="font-mono text-[10px] text-synapse-violet">{addr}</div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
 
                             {(result.unknown?.length || 0) > 0 && (
                               <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-3 md:col-span-2">
