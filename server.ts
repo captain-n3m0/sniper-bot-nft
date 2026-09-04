@@ -3998,7 +3998,7 @@ app.post(
       );
       const verification: SimulationResult = {
         ok: false,
-        eligibilityVerified: true,
+        eligibilityVerified: false,
         inconclusive: true,
         reason: `Expected timing guard: stage starts at ${startsAt}. No transaction was signed or broadcast`,
       };
@@ -4006,14 +4006,17 @@ app.post(
         chain: chain.key,
         eligibilitySource: "public-stage-config-and-mint-stats",
         stageStatus: "upcoming",
-        eligible: checks.filter((item) => item.eligible).map((item) => item.address),
-        warnings: checks
-          .filter((item) => item.eligible)
-          .map((item) => ({ address: item.address, reason: item.reason })),
+        // A wallet-limit/supply check can prove it will not mint, but an upcoming
+        // stage must never be shown as currently eligible. OpenSea also reports
+        // these wallets as not eligible until the stage is live.
+        eligible: [],
+        warnings: [],
         notEligible: checks
           .filter((item) => !item.eligible)
           .map((item) => ({ address: item.address, reason: item.reason })),
-        unknown: [],
+        unknown: checks
+          .filter((item) => item.eligible)
+          .map((item) => ({ address: item.address, reason: item.reason })),
         transactions: checks.map((item) => ({
           address: item.address,
           to: plan.to,
