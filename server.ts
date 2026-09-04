@@ -1983,7 +1983,8 @@ function normalizeStage(stage: any, index: number) {
 
 type SchedulerJobStatus = "pending" | "paused" | "running" | "completed" | "failed" | "stopped";
 type SchedulerWalletStatus = "queued" | "preparing" | "ready" | "broadcasting" | "completed" | "failed" | "stopped";
-const MAX_SCHEDULER_WORKERS = 24;
+const MAX_SCHEDULER_WALLETS = 50;
+const MAX_SCHEDULER_WORKERS = 50;
 
 interface SchedulerWalletTask {
   id: string;
@@ -4120,16 +4121,11 @@ app.post(
       throw new ApiError(400, "targetBlock must be a safe integer");
     }
     const wallets = schedulerWalletsFrom(body);
-    const parallelWorkers = Math.max(
-      1,
-      Math.min(
-        MAX_SCHEDULER_WORKERS,
-        Math.floor(Number(body.parallelWorkers ?? wallets.length)),
-      ),
-    );
-    if (!Number.isFinite(Number(body.parallelWorkers ?? wallets.length))) {
-      throw new ApiError(400, "parallelWorkers must be a positive number");
+    if (wallets.length > MAX_SCHEDULER_WALLETS) {
+      throw new ApiError(400, `Scheduled mints support a maximum of ${MAX_SCHEDULER_WALLETS} wallets`);
     }
+    // Automatically use one worker per selected wallet, capped at the scheduler limit.
+    const parallelWorkers = Math.max(1, Math.min(MAX_SCHEDULER_WORKERS, wallets.length));
     const requestedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
     let chain: ChainConfig;
     let endpoints: string[];

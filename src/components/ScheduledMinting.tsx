@@ -43,7 +43,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
   const [form, setForm] = useState({
     contractAddress: '',
     quantity: '1',
-    parallelWorkers: '8',
     openSeaSlug: '',
     openSeaApiKey: '',
     isAllowlist: false,
@@ -148,7 +147,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         targetTime: scheduledDate.toISOString(),
         contractAddress: form.contractAddress,
         quantity: Number(form.quantity),
-        parallelWorkers: Number(form.parallelWorkers),
         isAllowlist: form.isAllowlist,
         mintParams: mintParamsObj,
         salt: form.salt,
@@ -179,7 +177,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
       setForm({
         contractAddress: '',
         quantity: '1',
-        parallelWorkers: '8',
         openSeaSlug: '',
         openSeaApiKey: savedOpenSeaApiKey || '',
         isAllowlist: false,
@@ -248,7 +245,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <div className="font-mono text-xs text-white">{job.contractAddress.slice(0, 8)}…{job.contractAddress.slice(-6)}</div>
-                    <div className="mt-1 text-[11px] text-neutral-500">{job.chain} · {job.targetTime ? new Date(job.targetTime).toLocaleString() : `block ${job.targetBlock}`} · {job.walletCount} wallet(s) · {job.parallelWorkers || 1} worker(s)</div>
+                    <div className="mt-1 text-[11px] text-neutral-500">{job.chain} · {job.targetTime ? new Date(job.targetTime).toLocaleString() : `block ${job.targetBlock}`} · {job.walletCount} wallet(s) · {job.parallelWorkers || 1} automatic worker(s)</div>
                   </div>
                   <span className={`rounded-full border px-2 py-1 font-mono text-[10px] uppercase ${job.status === 'completed' ? 'border-emerald-500/30 text-emerald-400' : job.status === 'failed' ? 'border-red-500/30 text-red-400' : job.status === 'paused' ? 'border-yellow-500/30 text-yellow-400' : 'border-cyan-500/30 text-cyan-400'}`}>{job.status === 'pending' ? 'queued' : job.status}</span>
                 </div>
@@ -340,20 +337,9 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                 required
               />
             </div>
-            <div>
-              <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Parallel Workers</label>
-              <input
-                type="number"
-                min="1"
-                max="24"
-                value={form.parallelWorkers}
-                onChange={(e) => setForm({...form, parallelWorkers: e.target.value})}
-                className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
-                required
-              />
-              <p className="mt-2 text-xs text-neutral-500">Wallets are prepared and broadcast independently, up to 24 concurrent workers.</p>
-            </div>
           </div>
+
+          <p className="text-xs text-neutral-500">Worker count is automatic: one concurrent worker per selected wallet, up to 50 wallets.</p>
 
           <div className="rounded-xl border border-synapse-cyan/20 bg-synapse-cyan/[0.04] p-4">
             <div className="mb-4 flex items-center gap-2">

@@ -169,17 +169,17 @@ export const Documentation = () => {
             <div className="rounded-2xl border border-white/5 bg-white/[0.02] px-5">
               <Field name="Contract / slug">The NFT contract or OpenSea collection identifier.</Field>
               <Field name="Quantity">Tokens minted by each selected execution wallet.</Field>
-              <Field name="Parallel workers">Number of wallets prepared and broadcast concurrently, capped at 24.</Field>
+              <Field name="Parallel workers">Scheduler concurrency is automatic: one worker per selected wallet, capped at 50 wallets.</Field>
               <Field name="RPC routing">Alchemy is configured securely on the backend and placed ahead of public fallback RPCs.</Field>
               <Field name="OpenSea key">Used server-side to request wallet-specific unsigned mint actions.</Field>
               <Field name="Execution wallets">The exact imported wallets that will sign and broadcast.</Field>
             </div>
-            <p>When execution begins, each worker builds the plan, resolves its pending nonce and fast EIP-1559 fees, simulates, signs, and blasts the raw transaction across configured endpoints. One wallet failure does not stop the remaining workers.</p>
+            <p>When execution begins, each worker builds the plan, resolves its pending nonce and fast EIP-1559 fees, simulates, signs, and blasts the raw transaction across configured endpoints. One wallet failure does not stop the remaining workers. Scheduled jobs automatically assign up to 50 workers and do not expose a manual worker setting.</p>
             <Callout type="warning" title="Parallel does not mean duplicate">Each selected wallet mints independently. Do not select more wallets or a larger quantity than the intended total allocation.</Callout>
           </DocSection>
 
           <DocSection id="scheduler" eyebrow="06 / Automation" title="Scheduling with parallel workers">
-            <p>Scheduled Mint includes a Parallel Workers setting. It bounds how many selected wallets are prepared and broadcast at once (1–24), so you can balance speed against RPC and OpenSea rate limits. Jobs run server-side and continue if the browser is closed.</p>
+            <p>Scheduled Mint automatically prepares and broadcasts one worker per selected wallet, up to 50 wallets. Jobs run server-side and continue if the browser is closed.</p>
             <p>The scheduler uses the currently selected navbar chain and the Live Transaction Cost panel refreshes that chain’s gas feed every four seconds. Switching Ethereum, Base, Polygon, Arbitrum, Optimism, Robinhood, or Sepolia updates both the schedule payload and the displayed native-token fee symbol.</p>
           </DocSection>
 
