@@ -625,6 +625,11 @@ export const DropStages = ({
                         {/* Simulation Results Drawer */}
                         {result && (
                           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-white/5 pt-3">
+                            {stage.status === 'upcoming' && (
+                              <div className="md:col-span-2 rounded-xl border border-yellow-500/20 bg-yellow-500/5 px-3 py-2 font-mono text-[11px] text-yellow-400">
+                                Eligibility pending — this stage opens {stage.startTime ? `at ${new Date(stage.startTime * 1000).toLocaleString()}` : 'at the scheduled time'}. Public-stage access will be checked when it is live.
+                              </div>
+                            )}
                             <div className="rounded-xl border border-synapse-emerald/20 bg-synapse-emerald/5 p-3">
                               <div className="flex items-center gap-2 text-synapse-emerald mb-2">
                                 <CheckCircle2 size={14} />
