@@ -275,6 +275,7 @@ export const DropStages = ({
         .some((marker) => stageDescriptor.includes(marker));
 
       const targetChain = dropData?.chain || selectedChain;
+      const rawStageIndex = stage.raw?.stage_index ?? stage.raw?.stageIndex ?? stage.raw?.stage_id;
       const payload = {
         chain: targetChain,
         contractAddress: contractTarget,
@@ -283,6 +284,7 @@ export const DropStages = ({
         slug: dropData?.slug || (!slug.startsWith('0x') ? slug : undefined),
         openseaApiKey: apiKey.trim(),
         stageStatus: stage.status,
+        ...(Number.isFinite(Number(rawStageIndex)) ? { stageIndex: Number(rawStageIndex) } : {}),
         stageStartTime: stage.startTime,
         stageEndTime: stage.endTime,
         mintParams: null,

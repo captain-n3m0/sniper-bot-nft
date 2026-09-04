@@ -46,6 +46,21 @@ const DATABASE_PATH = path.resolve(
   process.env.DATABASE_PATH || (IS_PRODUCTION ? "/var/lib/lastlap-mintgrid/app.sqlite" : ".lastlap-mintgrid.sqlite"),
 );
 const MAX_USER_CONFIG_BYTES = 64 * 1024;
+const OPENSEA_GRAPHQL_URL = "https://gql.opensea.io/graphql";
+const OPENSEA_GRAPHQL_ELIGIBILITY_QUERY = `query DropEligibilityQuery($collectionSlug: String!, $address: Address!) {
+  dropBySlug(slug: $collectionSlug) {
+    __typename
+    stages {
+      __typename
+      stageType
+      stageIndex
+      isEligible
+      eligibleMinterAddress
+      eligibleMaxTotalMintableByWallet
+      eligiblePrice { token { symbol chain { identifier } } }
+    }
+  }
+}`;
 
 interface ChainConfig {
   key: string;
@@ -1427,6 +1442,59 @@ async function openSeaRequest(
   }
 }
 
+type GraphqlEligibilityResult = { eligible: boolean; definitive: boolean; reason?: string };
+
+/**
+ * OpenSea's wallet-specific eligibility feed is not guaranteed to be available
+ * to every API key. Treat it as an authoritative decision only when the
+ * response is well-formed; callers retain the REST mint-action fallback.
+ */
+async function openSeaGraphqlEligibility(
+  slug: string,
+  address: string,
+  apiKey?: string,
+  mode: "public" | "allowlist" = "allowlist",
+  stageIndex?: number,
+): Promise<GraphqlEligibilityResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 7_000);
+  try {
+    const response = await fetch(OPENSEA_GRAPHQL_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "x-app-id": "os2-web",
+        ...(apiKey ? { "x-api-key": apiKey } : {}),
+        "user-agent": USER_AGENT,
+      },
+      body: JSON.stringify({
+        operationName: "DropEligibilityQuery",
+        query: OPENSEA_GRAPHQL_ELIGIBILITY_QUERY,
+        variables: { collectionSlug: slug, address },
+      }),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.data?.dropBySlug?.stages || !Array.isArray(payload.data.dropBySlug.stages)) {
+      throw new Error(`GraphQL eligibility unavailable (HTTP ${response.status})`);
+    }
+    const stages = payload.data.dropBySlug.stages as Array<Record<string, any>>;
+    const relevant = stages.filter((stage) => {
+      const type = String(stage.stageType || "").toUpperCase();
+      const matchesType = mode === "public" ? type === "PUBLIC_SALE" : ["SIGNED_PRESALE", "MERKLE_PRESALE"].includes(type);
+      return matchesType && (stageIndex === undefined || Number(stage.stageIndex) === stageIndex);
+    });
+    if (!relevant.length) return { eligible: false, definitive: false, reason: "OpenSea returned no recognized mint stages" };
+    const explicit = relevant.find((stage) => typeof stage.isEligible === "boolean");
+    if (!explicit) return { eligible: false, definitive: false, reason: "OpenSea returned no wallet eligibility decision" };
+    if (explicit.isEligible === true) return { eligible: true, definitive: true };
+    return { eligible: false, definitive: true, reason: "OpenSea reports this wallet is not eligible for the selected stage" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface OpenSeaKeyRecord {
   key: string;
   source: "request" | "environment" | "instant";
@@ -1720,14 +1788,27 @@ async function checkOpenSeaMintEligibility(
   chain: ChainConfig,
   endpoints: string[],
   mode: "public" | "allowlist" = "allowlist",
+  stageIndex?: number,
 ) {
   return Promise.all(
     addresses.map(async (address) => {
       try {
+        const graphqlPromise = openSeaGraphqlEligibility(slug, address, apiKey, mode, stageIndex).catch((error) => {
+          if (IS_DEVELOPMENT) logServerError("opensea-graphql-eligibility", error, { slug, address });
+          return undefined;
+        });
         const action = await openSeaRequest(`/drops/${encodeURIComponent(slug)}/mint`, apiKey, {
           method: "POST",
           body: { minter: address, quantity: 1 },
         });
+        const graphqlEligibility = await graphqlPromise;
+        if (graphqlEligibility?.definitive && !graphqlEligibility.eligible) {
+          return {
+            address,
+            status: "notEligible" as const,
+            reason: graphqlEligibility.reason || "OpenSea reports this wallet is not eligible",
+          };
+        }
         const transaction = normalizeOpenSeaMintTransaction(action);
         const decoded = decodeMintTransaction(transaction, address);
         if (decoded.recipientMatches === false) {
@@ -3962,6 +4043,9 @@ app.post(
         chain,
         endpoints,
         mode,
+        body.stageIndex === undefined || body.stageIndex === null || body.stageIndex === ""
+          ? undefined
+          : Number(body.stageIndex),
       );
       return res.json({
         chain: chain.key,
