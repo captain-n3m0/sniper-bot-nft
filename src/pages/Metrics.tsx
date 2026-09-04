@@ -58,6 +58,7 @@ export const Metrics = () => {
   const [data, setData] = useState<MetricsPayload | null>(null);
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [probing, setProbing] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -85,6 +86,24 @@ export const Metrics = () => {
     };
   }, []);
 
+  const probeRpc = async () => {
+    setProbing(true);
+    try {
+      const response = await fetch('/api/metrics/probe', { method: 'POST' });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || 'RPC probe failed');
+      const refresh = await fetch('/api/metrics');
+      const refreshed = await refresh.json();
+      if (!refresh.ok) throw new Error(refreshed.error || 'Metrics refresh failed');
+      setData(refreshed);
+      setError('');
+    } catch (probeError) {
+      setError(probeError instanceof Error ? probeError.message : 'RPC probe failed');
+    } finally {
+      setProbing(false);
+    }
+  };
+
   const requestSeries = useMemo(() => data?.series.map((point) => point.requests) || [], [data]);
   const latencySeries = useMemo(() => data?.series.map((point) => point.averageLatencyMs) || [], [data]);
 
@@ -98,9 +117,12 @@ export const Metrics = () => {
             <h1 className="font-serif text-5xl md:text-7xl">Platform Metrics</h1>
             <p className="mt-4 max-w-2xl text-neutral-400">Real-time operational telemetry from the current LastLap MintGrid server deployment. Request graphs cover the latest rolling 60 minutes.</p>
           </div>
-          <div className="flex items-center gap-2 font-mono text-xs text-neutral-500">
+          <div className="flex flex-wrap items-center gap-3 font-mono text-xs text-neutral-500">
             <RefreshCw size={13} className={refreshing ? 'animate-spin text-synapse-cyan' : ''} />
             Refreshes every 5 seconds
+            <button type="button" onClick={() => void probeRpc()} disabled={probing} className="rounded-lg border border-synapse-cyan/30 px-3 py-2 text-synapse-cyan transition-colors hover:bg-synapse-cyan/10 disabled:opacity-50">
+              {probing ? 'Probing RPCs…' : 'Probe all RPCs'}
+            </button>
           </div>
         </div>
 
@@ -135,7 +157,7 @@ export const Metrics = () => {
                   {data.rpc.map((network) => (
                     <div key={network.key} className="grid grid-cols-[1fr_auto_auto] items-center gap-4 rounded-xl border border-white/5 bg-black/30 px-4 py-3">
                       <div><div className="text-sm text-white">{network.name}</div><div className="font-mono text-[10px] uppercase tracking-widest text-neutral-600">{network.successes + network.failures} observed calls</div></div>
-                      <div className="text-right font-mono text-xs text-neutral-400">{network.lastLatencyMs === null ? 'Awaiting data' : `${network.lastLatencyMs} ms`}</div>
+                      <div className="text-right font-mono text-xs text-neutral-400">{network.lastLatencyMs === null ? 'No calls yet' : `${network.lastLatencyMs} ms`}</div>
                       <div className={`w-16 text-right font-mono text-xs ${network.successRate === null || network.successRate >= 95 ? 'text-synapse-emerald' : 'text-yellow-400'}`}>{network.successRate === null ? '—' : `${network.successRate}%`}</div>
                     </div>
                   ))}

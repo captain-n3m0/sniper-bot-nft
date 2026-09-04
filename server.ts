@@ -3226,6 +3226,29 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+app.post(
+  "/api/metrics/probe",
+  asyncRoute(async (_req, res) => {
+    const results = await Promise.all(
+      CHAINS.map(async (chain) => {
+        try {
+          const block = await withRpcFallback(rpcUrlsFor(chain), (url) =>
+            providerFor(url, chain).getBlockNumber(),
+          );
+          const health = rpcUrlsFor(chain)
+            .map((url) => rpcHealth.get(url))
+            .filter((item): item is RpcHealth => Boolean(item))
+            .sort((a, b) => (a?.lastLatencyMs ?? Infinity) - (b?.lastLatencyMs ?? Infinity))[0];
+          return { chain: chain.key, ok: true, block, latencyMs: health?.lastLatencyMs ?? null };
+        } catch (error) {
+          return { chain: chain.key, ok: false, error: errorMessage(error).slice(0, 180) };
+        }
+      }),
+    );
+    res.json({ success: true, results });
+  }),
+);
+
 app.get(
   "/api/status",
   asyncRoute(async (_req, res) => {
