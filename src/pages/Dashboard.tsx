@@ -12,7 +12,7 @@ import { WalletLogin } from '../components/WalletLogin';
 import { LiveTransactionFee } from '../components/LiveTransactionFee';
 import { resolveChain } from '../lib/chains';
 
-const MAX_SNIPER_WORKERS = 24;
+const MAX_SNIPER_WORKERS = 50;
 const MAX_CLIENT_LOGS = 250;
 const CONFIG_SAVE_DELAY_MS = 700;
 const WALLET_SAVE_DELAY_MS = 500;
@@ -28,7 +28,6 @@ interface SniperFormState {
   signature: string;
   openSeaSlug: string;
   openSeaApiKey: string;
-  parallelWorkers: string;
 }
 
 const DEFAULT_SNIPER_FORM: SniperFormState = {
@@ -40,16 +39,11 @@ const DEFAULT_SNIPER_FORM: SniperFormState = {
   signature: '',
   openSeaSlug: '',
   openSeaApiKey: '',
-  parallelWorkers: '8'
 };
 
 const shortAddress = (address: string) => `${address.slice(0, 6)}...${address.slice(-4)}`;
 
-const sniperWorkerCount = (value: string, walletCount: number) => {
-  const requested = Math.floor(Number(value));
-  if (!Number.isFinite(requested) || requested < 1) return 1;
-  return Math.max(1, Math.min(requested, walletCount, MAX_SNIPER_WORKERS));
-};
+const sniperWorkerCount = (walletCount: number) => Math.max(1, Math.min(walletCount, MAX_SNIPER_WORKERS));
 
 const textConfig = (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback);
 const chainConfig = (value: unknown) => resolveChain(textConfig(value))?.key || 'ethereum';
@@ -68,7 +62,6 @@ const persistedConfig = (selectedChain: string, form: SniperFormState, activeTab
     isAllowlist: form.isAllowlist,
     openSeaSlug: form.openSeaSlug,
     openSeaApiKey: form.openSeaApiKey,
-    parallelWorkers: form.parallelWorkers
   }
 });
 
@@ -156,7 +149,6 @@ export const Dashboard = () => {
           isAllowlist: typeof remoteSniper.isAllowlist === 'boolean' ? remoteSniper.isAllowlist : false,
           openSeaSlug: textConfig(remoteSniper.openSeaSlug),
           openSeaApiKey: textConfig(remoteSniper.openSeaApiKey),
-          parallelWorkers: textConfig(remoteSniper.parallelWorkers, DEFAULT_SNIPER_FORM.parallelWorkers)
         };
         const nextChain = chainConfig(remoteConfig.selectedChain);
         const nextTab = tabConfig(remoteConfig.activeTab);
@@ -372,7 +364,7 @@ export const Dashboard = () => {
         return;
       }
 
-      const workerCount = sniperWorkerCount(form.parallelWorkers, activeWallets.length);
+      const workerCount = sniperWorkerCount(activeWallets.length);
       addLog(
         'SYSTEM',
         `Spawning ${workerCount} parallel mint worker${workerCount === 1 ? '' : 's'} for ${activeWallets.length} execution wallet${activeWallets.length === 1 ? '' : 's'}.`,
@@ -536,22 +528,6 @@ export const Dashboard = () => {
                 </div>
 
                 <div>
-                  <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Parallel Workers</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max={MAX_SNIPER_WORKERS}
-                    value={form.parallelWorkers}
-                    onChange={(e) => setForm({...form, parallelWorkers: e.target.value})}
-                    className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
-                    required
-                  />
-                  <p className="mt-2 text-xs text-neutral-500">Selected execution wallets are prepared and broadcast concurrently. Max {MAX_SNIPER_WORKERS} workers.</p>
-                </div>
-
-                
-                
-                <div>
                   <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">OpenSea API Key</label>
                   <input
                     type="password"
@@ -608,7 +584,7 @@ export const Dashboard = () => {
                       })}
                     </div>
                   )}
-                  <p className="mt-2 text-xs text-neutral-500">If no wallets are selected, the sniper will only generate and return the calldata.</p>
+                  <p className="mt-2 text-xs text-neutral-500">Workers are automatic: one per selected execution wallet, up to 50. If no wallets are selected, the sniper only generates calldata.</p>
                 </div>
 
                 <LiveTransactionFee
