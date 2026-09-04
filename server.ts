@@ -1983,6 +1983,7 @@ function normalizeStage(stage: any, index: number) {
 
 type SchedulerJobStatus = "pending" | "paused" | "running" | "completed" | "failed" | "stopped";
 type SchedulerWalletStatus = "queued" | "preparing" | "ready" | "broadcasting" | "completed" | "failed" | "stopped";
+const MAX_SCHEDULER_WORKERS = 24;
 
 interface SchedulerWalletTask {
   id: string;
@@ -2013,6 +2014,7 @@ interface SchedulerJob {
   contractAddress: string;
   mode: "public" | "allowlist";
   quantity: number;
+  parallelWorkers: number;
   openSea?: {
     slug: string;
     apiKey: string;
@@ -2104,6 +2106,7 @@ function schedulerPublic(job: SchedulerJob) {
     openSeaKeySource: job.openSea?.keySource,
     armAttempts: job.armAttempts,
     walletCount: job.walletCount,
+    parallelWorkers: job.parallelWorkers,
     wallets: job.wallets.map((wallet) => ({
       id: wallet.id,
       name: wallet.name,
@@ -2178,6 +2181,7 @@ export function restoreSchedulerJobs() {
       const job: SchedulerJob = {
         ...stored,
         chain,
+        parallelWorkers: Math.max(1, Math.min(MAX_SCHEDULER_WORKERS, Number(stored.parallelWorkers) || 1)),
         plan: stored.plan
           ? {
               ...stored.plan,
@@ -2319,6 +2323,30 @@ export function runIsolatedSchedulerTasks<T, R>(
   return Promise.allSettled(items.map((item, index) => operation(item, index)));
 }
 
+/** Run independent wallet tasks with a bounded number of concurrent workers. */
+export async function runSchedulerWorkerPool<T, R>(
+  items: T[],
+  workerCount: number,
+  operation: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      try {
+        results[index] = { status: "fulfilled", value: await operation(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  const count = Math.max(1, Math.min(Number.isFinite(workerCount) ? Math.floor(workerCount) : 1, MAX_SCHEDULER_WORKERS, items.length || 1));
+  await Promise.all(Array.from({ length: count }, worker));
+  return results;
+}
+
 async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> {
   if (job.arming || !["pending", "running"].includes(job.status)) return;
   if (!force && job.nextArmAttemptAt > Date.now()) return;
@@ -2337,8 +2365,9 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
   job.updatedAt = new Date().toISOString();
   persistSchedulerJob(job);
   job.arming = (async () => {
-    const settled = await runIsolatedSchedulerTasks(
+    const settled = await runSchedulerWorkerPool(
       candidates,
+      job.parallelWorkers,
       async (wallet) => {
         const signedTransaction = job.openSea
           ? await scheduledOpenSeaTransaction(job, wallet.privateKey)
@@ -2432,8 +2461,9 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
     if (!readyWallets.length) throw new Error(job.error || "No scheduled wallet could be prepared");
     readyWallets.forEach((wallet) => (wallet.status = "broadcasting"));
     persistSchedulerJob(job);
-    const settled = await runIsolatedSchedulerTasks(
+    const settled = await runSchedulerWorkerPool(
       readyWallets,
+      job.parallelWorkers,
       (wallet) => broadcastSignedTransaction(wallet.signedTransaction!, job.chain, job.endpoints),
     );
     settled.forEach((result, index) => {
@@ -4090,6 +4120,16 @@ app.post(
       throw new ApiError(400, "targetBlock must be a safe integer");
     }
     const wallets = schedulerWalletsFrom(body);
+    const parallelWorkers = Math.max(
+      1,
+      Math.min(
+        MAX_SCHEDULER_WORKERS,
+        Math.floor(Number(body.parallelWorkers ?? wallets.length)),
+      ),
+    );
+    if (!Number.isFinite(Number(body.parallelWorkers ?? wallets.length))) {
+      throw new ApiError(400, "parallelWorkers must be a positive number");
+    }
     const requestedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
     let chain: ChainConfig;
     let endpoints: string[];
@@ -4145,6 +4185,7 @@ app.post(
       contractAddress,
       mode,
       quantity,
+      parallelWorkers,
       openSea,
       wallets,
       walletCount: wallets.length,

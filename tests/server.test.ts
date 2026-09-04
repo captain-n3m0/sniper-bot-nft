@@ -17,7 +17,7 @@ process.env.CONFIG_ENCRYPTION_KEY = "test-config-encryption-key-that-is-long-and
 process.env.OPENSEA_API_KEY = "test-opensea-key";
 process.env.SIWE_DOMAIN = "";
 
-const { default: app, clearSchedulerMemoryForTest, decodeMintTransaction, restoreSchedulerJobs, runIsolatedSchedulerTasks, withRpcFallback } = await import("../server.ts");
+const { default: app, clearSchedulerMemoryForTest, decodeMintTransaction, restoreSchedulerJobs, runIsolatedSchedulerTasks, runSchedulerWorkerPool, withRpcFallback } = await import("../server.ts");
 
 let server: Server;
 let baseUrl = "";
@@ -217,6 +217,20 @@ test("scheduler wallet work is isolated when one wallet fails", async () => {
   assert.equal(results[0].status, "fulfilled");
   assert.equal(results[1].status, "rejected");
   assert.equal(results[2].status, "fulfilled");
+});
+
+test("scheduler worker pool respects the configured concurrency", async () => {
+  let active = 0;
+  let peak = 0;
+  const results = await runSchedulerWorkerPool([1, 2, 3, 4, 5], 2, async (value) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    active -= 1;
+    return value * 2;
+  });
+  assert.equal(peak, 2);
+  assert.deepEqual(results.map((result) => result.status === "fulfilled" ? result.value : null), [2, 4, 6, 8, 10]);
 });
 
 test("RPC fallback retries transport failures but returns EVM outcomes immediately", async () => {

@@ -178,8 +178,13 @@ export const Documentation = () => {
             <Callout type="warning" title="Parallel does not mean duplicate">Each selected wallet mints independently. Do not select more wallets or a larger quantity than the intended total allocation.</Callout>
           </DocSection>
 
+          <DocSection id="scheduler" eyebrow="06 / Automation" title="Scheduling with parallel workers">
+            <p>Scheduled Mint includes a Parallel Workers setting. It bounds how many selected wallets are prepared and broadcast at once (1–24), so you can balance speed against RPC and OpenSea rate limits. Jobs run server-side and continue if the browser is closed.</p>
+            <p>The scheduler uses the currently selected navbar chain and the Live Transaction Cost panel refreshes that chain’s gas feed every four seconds. Switching Ethereum, Base, Polygon, Arbitrum, Optimism, Robinhood, or Sepolia updates both the schedule payload and the displayed native-token fee symbol.</p>
+          </DocSection>
+
           <DocSection id="gas" eyebrow="07 / Capital" title="Live gas and Fund Disperser">
-            <p>The Sniper’s Live Transaction Cost panel refreshes every four seconds. Before preparation, it uses a conservative provisional gas limit. After preparation, it uses the transaction’s estimated gas limit and exact mint value.</p>
+            <p>The Sniper and Scheduler Live Transaction Cost panels refresh every four seconds. Before preparation, they use a conservative provisional gas limit. After preparation, the Sniper uses the transaction’s estimated gas limit and exact mint value.</p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <Feature icon={Fuel} title="Maximum fee">The panel shows the fast EIP-1559 fee cap multiplied by gas limit. The network normally charges less than this cap.</Feature>
               <Feature icon={CircleDollarSign} title="Required balance">Fund each execution wallet for mint value plus maximum gas, leaving a small buffer for fee movement.</Feature>
