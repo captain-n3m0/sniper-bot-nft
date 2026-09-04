@@ -46,6 +46,15 @@ const shortAddress = (address: string) => `${address.slice(0, 6)}...${address.sl
 const sniperWorkerCount = (walletCount: number) => Math.max(1, Math.min(walletCount, MAX_SNIPER_WORKERS));
 
 const textConfig = (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback);
+const readJsonResponse = async (response: Response) => {
+  const body = await response.text();
+  try {
+    return body ? JSON.parse(body) : {};
+  } catch {
+    const contentType = response.headers.get('content-type') || 'unknown content type';
+    throw new Error(`Server returned ${response.status} (${contentType}) instead of JSON. Check that the API is reachable.`);
+  }
+};
 const chainConfig = (value: unknown) => resolveChain(textConfig(value))?.key || 'ethereum';
 const tabConfig = (value: unknown): DashboardTab =>
   ['sniper', 'wallets', 'stages', 'scheduler', 'gas'].includes(String(value))
@@ -198,7 +207,7 @@ export const Dashboard = () => {
             },
             body: JSON.stringify({ config: nextConfig })
           });
-          const data = await response.json();
+          const data = await readJsonResponse(response);
           if (!response.ok || !data.success) {
             if (response.status === 401) clearAuth();
             throw new Error(data.error || 'Could not save config');
@@ -235,7 +244,7 @@ export const Dashboard = () => {
             },
             body: JSON.stringify({ wallets })
           });
-          const data = await response.json();
+          const data = await readJsonResponse(response);
           if (!response.ok || !data.success || !Array.isArray(data.wallets)) {
             if (response.status === 401) clearAuth();
             throw new Error(data.error || 'Could not save execution wallets');
