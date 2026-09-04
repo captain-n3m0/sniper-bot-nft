@@ -170,7 +170,7 @@ export const Documentation = () => {
               <Field name="Contract / slug">The NFT contract or OpenSea collection identifier.</Field>
               <Field name="Quantity">Tokens minted by each selected execution wallet.</Field>
               <Field name="Parallel workers">Number of wallets prepared and broadcast concurrently, capped at 24.</Field>
-              <Field name="RPC key / URL">An Alchemy key or full custom HTTPS RPC URL placed ahead of public fallbacks.</Field>
+              <Field name="RPC routing">Alchemy is configured securely on the backend and placed ahead of public fallback RPCs.</Field>
               <Field name="OpenSea key">Used server-side to request wallet-specific unsigned mint actions.</Field>
               <Field name="Execution wallets">The exact imported wallets that will sign and broadcast.</Field>
             </div>

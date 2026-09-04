@@ -197,18 +197,33 @@ class ApiError extends Error {
 
 const SENSITIVE_LOG_KEY = /private.?key|api.?key|authorization|cookie|signature|signed.?tx|token|secret|password/i;
 
+function redactLogString(value: string): string {
+  let redacted = value.replace(
+    /(https?:\/\/[^\s"']*\.alchemy\.com\/v2\/)[A-Za-z0-9_-]+/gi,
+    "$1[REDACTED]",
+  );
+  for (const [key, secret] of Object.entries(process.env)) {
+    if (!SENSITIVE_LOG_KEY.test(key) || !secret || secret.length < 8) continue;
+    redacted = redacted.split(secret).join("[REDACTED]");
+  }
+  return redacted;
+}
+
 function redactForLog(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
   if (value === null || value === undefined || typeof value === "number" || typeof value === "boolean") {
     return value;
   }
   if (typeof value === "bigint") return value.toString();
-  if (typeof value === "string") return value.length > 1_000 ? `${value.slice(0, 1_000)}…` : value;
+  if (typeof value === "string") {
+    const redacted = redactLogString(value);
+    return redacted.length > 1_000 ? `${redacted.slice(0, 1_000)}…` : redacted;
+  }
   if (typeof value !== "object") return String(value);
   if (value instanceof Error) {
     return {
       name: value.name,
-      message: value.message,
-      stack: value.stack,
+      message: redactLogString(value.message),
+      stack: value.stack ? redactLogString(value.stack) : undefined,
       code: (value as Error & { code?: unknown }).code,
     };
   }
@@ -226,7 +241,7 @@ function redactForLog(value: unknown, depth = 0, seen = new WeakSet<object>()): 
 }
 
 function logServerError(scope: string, error: unknown, context?: Record<string, unknown>) {
-  const message = errorMessage(error);
+  const message = redactLogString(errorMessage(error));
   if (!IS_DEVELOPMENT) {
     console.error(`[${scope}] ${message}`);
     return;
@@ -456,12 +471,17 @@ function rpcUrlsFor(chain: ChainConfig, body?: Record<string, any>): string[] {
     process.env[`RPC_URL_${chain.key.toUpperCase()}`] ||
       process.env[`RPC_URLS_${chain.key.toUpperCase()}`],
   );
+  const alchemyApiKey = String(process.env.ALCHEMY_API_KEY || "").trim();
+  const alchemyUrl =
+    alchemyApiKey && chain.alchemyHost && /^[A-Za-z0-9_-]{8,}$/.test(alchemyApiKey)
+      ? `https://${chain.alchemyHost}/v2/${alchemyApiKey}`
+      : undefined;
   const keyOrUrl = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
   if (/^https?:\/\//i.test(keyOrUrl)) explicit.unshift(...parseUrlList(keyOrUrl));
   else if (keyOrUrl && chain.alchemyHost && /^[A-Za-z0-9_-]{8,}$/.test(keyOrUrl)) {
     explicit.unshift(`https://${chain.alchemyHost}/v2/${keyOrUrl}`);
   }
-  return [...new Set([...explicit, ...fromEnvironment, ...chain.rpcUrls])].slice(0, 20);
+  return [...new Set([...explicit, ...(alchemyUrl ? [alchemyUrl] : []), ...fromEnvironment, ...chain.rpcUrls])].slice(0, 20);
 }
 
 function maskRpcUrl(url: string): string {

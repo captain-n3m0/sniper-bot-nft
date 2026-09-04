@@ -21,7 +21,6 @@ interface WalletManagerProps {
   setWallets: React.Dispatch<React.SetStateAction<StoredWallet[]>>;
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
-  rpcApiKey: string;
   authToken: string;
 }
 
@@ -71,7 +70,7 @@ function isEncryptedKeystore(value: unknown) {
   return Number(record.version) === 3 && Boolean(record.crypto || record.Crypto);
 }
 
-export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, rpcApiKey, authToken }: WalletManagerProps) => {
+export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, authToken }: WalletManagerProps) => {
   const [name, setName] = useState('');
   const [privateKey, setPrivateKey] = useState('');
   const [error, setError] = useState('');
@@ -123,7 +122,6 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, rpcA
           },
           body: JSON.stringify({
             chain: selectedChain,
-            apiKey: rpcApiKey,
             sourceAddress: sourceWallet.address,
             recipients: recipientWallets.map((wallet) => wallet.address),
             amountEach,
@@ -153,7 +151,7 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, rpcA
       clearInterval(refresh);
       controller?.abort();
     };
-  }, [sourceWallet?.address, recipientWallets.map((wallet) => wallet.address).join(','), amountEach, feeTier, selectedChain, rpcApiKey, authToken]);
+  }, [sourceWallet?.address, recipientWallets.map((wallet) => wallet.address).join(','), amountEach, feeTier, selectedChain, authToken]);
 
   const readableNative = (wei: string) => {
     try {
@@ -327,7 +325,6 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, rpcA
         },
         body: JSON.stringify({
           chain: selectedChain,
-          apiKey: rpcApiKey,
           sourcePrivateKey: sourceWallet.privateKey,
           recipients: recipientWallets.map((wallet) => wallet.address),
           amountEach,

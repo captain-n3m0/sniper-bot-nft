@@ -25,7 +25,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
   const [form, setForm] = useState({
     contractAddress: '',
     quantity: '1',
-    apiKey: '',
     openSeaSlug: '',
     openSeaApiKey: '',
     isAllowlist: false,
@@ -102,7 +101,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
         mintParams: mintParamsObj,
         salt: form.salt,
         signature: form.signature,
-        apiKey: form.apiKey,
         slug: form.openSeaSlug.trim() || undefined,
         openseaApiKey: form.openSeaApiKey.trim() || undefined,
         feeTier: 'fast',
@@ -128,7 +126,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
       setForm({
         contractAddress: '',
         quantity: '1',
-        apiKey: '',
         openSeaSlug: '',
         openSeaApiKey: '',
         isAllowlist: false,
@@ -190,7 +187,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
             </div>
           )}
           
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+          <div>
             <div>
               <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">
                 Contract Address
@@ -225,15 +222,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, initialDraft 
                 onChange={(e) => setForm({...form, quantity: e.target.value})}
                 className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-emerald/50 focus:bg-white/5 transition-colors"
                 required
-              />
-            </div>
-            <div>
-              <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">RPC API Key (Optional)</label>
-              <input 
-                type="text" 
-                value={form.apiKey}
-                onChange={(e) => setForm({...form, apiKey: e.target.value})}
-                className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
               />
             </div>
           </div>

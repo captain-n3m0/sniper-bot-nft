@@ -18,7 +18,6 @@ const CONFIG_SAVE_DELAY_MS = 700;
 type DashboardTab = 'sniper' | 'wallets' | 'stages' | 'scheduler' | 'gas';
 
 interface SniperFormState {
-  apiKey: string;
   contractAddress: string;
   quantity: string;
   isAllowlist: boolean;
@@ -31,7 +30,6 @@ interface SniperFormState {
 }
 
 const DEFAULT_SNIPER_FORM: SniperFormState = {
-  apiKey: '',
   contractAddress: '',
   quantity: '1',
   isAllowlist: false,
@@ -63,7 +61,6 @@ const persistedConfig = (selectedChain: string, form: SniperFormState, activeTab
   activeTab,
   selectedChain,
   sniper: {
-    apiKey: form.apiKey,
     contractAddress: form.contractAddress,
     quantity: form.quantity,
     isAllowlist: form.isAllowlist,
@@ -132,7 +129,6 @@ export const Dashboard = () => {
         const remoteSniper = remoteConfig.sniper && typeof remoteConfig.sniper === 'object' ? remoteConfig.sniper : {};
         const nextForm: SniperFormState = {
           ...DEFAULT_SNIPER_FORM,
-          apiKey: textConfig(remoteSniper.apiKey),
           contractAddress: textConfig(remoteSniper.contractAddress),
           quantity: textConfig(remoteSniper.quantity, DEFAULT_SNIPER_FORM.quantity),
           isAllowlist: typeof remoteSniper.isAllowlist === 'boolean' ? remoteSniper.isAllowlist : false,
@@ -242,7 +238,6 @@ export const Dashboard = () => {
         }
         const payload = {
           chain: selectedChain,
-          apiKey: form.apiKey,
           contractAddress: form.contractAddress,
           quantity: Number(form.quantity),
           privateKey: wallet ? wallet.privateKey : '',
@@ -302,7 +297,6 @@ export const Dashboard = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             chain: selectedChain,
-            apiKey: form.apiKey,
             transaction: prepared.transaction,
             privateKey: wallet.privateKey
           })
@@ -500,18 +494,6 @@ export const Dashboard = () => {
                 
                 
                 <div>
-                  <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">RPC API Key or Full Custom Node URL (Optional)</label>
-                  <input 
-                    type="text" 
-                    value={form.apiKey}
-                    onChange={(e) => setForm({...form, apiKey: e.target.value})}
-                    className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
-                    placeholder="Alchemy API Key or https://..."
-                  />
-                  <p className="mt-2 text-xs text-neutral-500">Bypasses public rate-limits. Strongly recommended for high-competition mints.</p>
-                </div>
-
-                <div>
                   <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">OpenSea API Key</label>
                   <input
                     type="password"
@@ -611,7 +593,6 @@ export const Dashboard = () => {
                 setWallets={setWallets}
                 addLog={addLog}
                 selectedChain={selectedChain}
-                rpcApiKey={form.apiKey}
                 authToken={authToken}
               />
             )}
