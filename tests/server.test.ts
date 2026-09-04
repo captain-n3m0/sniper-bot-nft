@@ -172,6 +172,13 @@ test("scheduler jobs are owner-scoped, durable, and controllable", async () => {
     assert.equal((await request("/api/scheduler/jobs", { token: strangerToken })).body.count, 0);
     assert.equal((await request(`/api/scheduler/jobs/${id}/pause`, { method: "POST", token: strangerToken })).status, 404);
     assert.equal((await request(`/api/scheduler/jobs/${id}/pause`, { method: "POST", token })).body.job.status, "paused");
+    const edited = await request(`/api/scheduler/jobs/${id}`, {
+      method: "PUT",
+      token,
+      body: { targetTime: new Date(Date.now() + 120_000).toISOString(), quantity: 2 },
+    });
+    assert.equal(edited.status, 200);
+    assert.equal(edited.body.job.status, "paused");
     clearSchedulerMemoryForTest();
     restoreSchedulerJobs();
     const restored = await request("/api/scheduler/jobs", { token });

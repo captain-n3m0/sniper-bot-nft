@@ -4236,6 +4236,42 @@ function ownedActiveSchedulerJob(req: Request): { session: AuthenticatedSession;
   return { session, job };
 }
 
+app.put("/api/scheduler/jobs/:id", (req, res) => {
+  const { job } = ownedActiveSchedulerJob(req);
+  if (!['pending', 'paused'].includes(job.status)) {
+    throw new ApiError(409, `Only queued or paused jobs can be edited (current status: ${job.status})`);
+  }
+  const body = (req.body || {}) as Record<string, any>;
+  if (body.targetTime !== undefined) {
+    const targetTime = parseTargetTime(body.targetTime);
+    if (targetTime === undefined || targetTime <= Date.now() + 250) {
+      throw new ApiError(400, "targetTime must be at least 250ms in the future");
+    }
+    job.targetTime = targetTime;
+    job.targetBlock = undefined;
+  }
+  if (body.quantity !== undefined) job.quantity = requireQuantity(body.quantity);
+  job.wallets.forEach((wallet) => {
+    wallet.status = "queued";
+    wallet.signedTransaction = undefined;
+    wallet.txHash = undefined;
+    wallet.acceptedBy = undefined;
+    wallet.acceptedAt = undefined;
+    wallet.submissionLatencyMs = undefined;
+    wallet.targetOffsetMs = undefined;
+    wallet.error = undefined;
+  });
+  job.stopRequested = false;
+  job.error = undefined;
+  job.result = undefined;
+  job.armAttempts = 0;
+  job.nextArmAttemptAt = 0;
+  job.warmed = false;
+  job.updatedAt = new Date().toISOString();
+  persistSchedulerJob(job);
+  res.json({ success: true, job: schedulerPublic(job) });
+});
+
 app.post("/api/scheduler/jobs/:id/pause", (req, res) => {
   const { job } = ownedActiveSchedulerJob(req);
   if (job.status !== "pending") throw new ApiError(409, `Only queued jobs can be paused (current status: ${job.status})`);

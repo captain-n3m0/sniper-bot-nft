@@ -57,6 +57,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
   const [jobs, setJobs] = useState<SchedulerJobSummary[]>([]);
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobAction, setJobAction] = useState('');
+  const [editingJobId, setEditingJobId] = useState<string | null>(null);
 
   const loadJobs = async (quiet = false) => {
     if (!authToken) return;
@@ -158,10 +159,10 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         chain: selectedChain
       };
 
-      const response = await fetch('/api/scheduler/create', {
-        method: 'POST',
+      const response = await fetch(editingJobId ? `/api/scheduler/jobs/${editingJobId}` : '/api/scheduler/create', {
+        method: editingJobId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(editingJobId ? { targetTime: payload.targetTime, quantity: payload.quantity } : payload)
       });
 
       const data = await response.json();
@@ -169,9 +170,10 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         throw new Error(data.error || 'Failed to schedule mint.');
       }
 
-      setScheduledJob(data);
+      setEditingJobId(null);
+      setScheduledJob(editingJobId ? null : data);
       void loadJobs(true);
-      addLog('SUCCESS', `Task [${data.taskId}] scheduled for ${scheduledDate.toLocaleString()}`, 'text-synapse-emerald');
+      addLog('SUCCESS', editingJobId ? `Scheduled job updated for ${scheduledDate.toLocaleString()}` : `Task [${data.taskId}] scheduled for ${scheduledDate.toLocaleString()}`, 'text-synapse-emerald');
       
       // Reset form (keep wallets selected for convenience)
       setForm({
@@ -191,6 +193,18 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
     } finally {
       setIsScheduling(false);
     }
+  };
+
+  const beginEdit = (job: SchedulerJobSummary) => {
+    if (!job.targetTime) return;
+    const date = new Date(job.targetTime);
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+    setEditingJobId(job.id);
+    setScheduledJob(null);
+    setTargetTime(local);
+    setForm((current) => ({ ...current, contractAddress: job.contractAddress }));
+    setSelectedWalletIds(new Set((job.wallets || []).map((wallet) => wallet.id)));
+    setError('');
   };
 
   const controlJob = async (job: SchedulerJobSummary, action: 'pause' | 'resume' | 'stop' | 'delete') => {
@@ -264,6 +278,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                   {job.status === 'pending' && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'pause')} className="rounded border border-yellow-500/30 px-2 py-1 text-[10px] text-yellow-400">Pause</button>}
                   {job.status === 'paused' && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'resume')} className="rounded border border-emerald-500/30 px-2 py-1 text-[10px] text-emerald-400">Resume</button>}
                   {['pending', 'paused', 'running'].includes(job.status) && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'stop')} className="rounded border border-red-500/30 px-2 py-1 text-[10px] text-red-400">Stop</button>}
+                  {['pending', 'paused'].includes(job.status) && <button type="button" disabled={Boolean(jobAction)} onClick={() => beginEdit(job)} className="rounded border border-synapse-violet/30 px-2 py-1 text-[10px] text-synapse-violet">Edit</button>}
                   {job.status !== 'running' && <button type="button" disabled={Boolean(jobAction)} onClick={() => void controlJob(job, 'delete')} className="rounded border border-white/10 px-2 py-1 text-[10px] text-neutral-400">Delete</button>}
                 </div>
               </div>
@@ -475,7 +490,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
             className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl bg-white px-4 py-4 font-mono text-sm font-bold text-black transition-transform hover:scale-[1.02] active:scale-100 disabled:opacity-50 disabled:hover:scale-100"
           >
             {isScheduling ? <Loader2 size={16} className="animate-spin" /> : <Clock size={16} />} 
-            {isScheduling ? 'DISPATCHING...' : 'SCHEDULE MINT TASK'}
+            {isScheduling ? 'DISPATCHING...' : editingJobId ? 'SAVE SCHEDULE CHANGES' : 'SCHEDULE MINT TASK'}
           </button>
         </form>
       )}
