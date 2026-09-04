@@ -48,7 +48,10 @@ async function authenticate() {
 }
 
 async function main() {
-  const targetTime = Date.parse(deployment.stage.startsAt);
+  const targetDelaySeconds = Number(process.env.BENCHMARK_TARGET_DELAY_SECONDS || 0);
+  const targetTime = targetDelaySeconds > 0
+    ? Date.now() + Math.max(20, Math.floor(targetDelaySeconds)) * 1_000
+    : Date.parse(deployment.stage.startsAt);
   if (!Number.isFinite(targetTime) || targetTime < Date.now() + 20_000) {
     throw new Error("The Sepolia fixture must start at least 20 seconds in the future");
   }
@@ -63,6 +66,7 @@ async function main() {
       quantity: 1,
       chain: "sepolia",
       isAllowlist: false,
+      feeRecipient: wallet.address,
       wallets: [{ id: "sepolia-benchmark", name: "Sepolia benchmark", address: wallet.address, privateKey: wallet.privateKey }],
     }),
   });

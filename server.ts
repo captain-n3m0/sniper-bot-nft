@@ -2503,8 +2503,8 @@ async function schedulerTick() {
       if (job.status !== "pending") continue;
       if (job.targetTime !== undefined) {
         const remaining = job.targetTime - now;
-        if (remaining <= 15_000) void warmRpcEndpoints(job);
-        const armWindow = job.openSea ? 10_000 : 3_000;
+        if (remaining <= 45_000) void warmRpcEndpoints(job);
+        const armWindow = 30_000;
         if (remaining <= armWindow && remaining > 0) void armSchedulerJob(job);
         if (remaining <= 0) void executeSchedulerJob(job);
         continue;

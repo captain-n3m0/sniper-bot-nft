@@ -368,7 +368,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                 />
               </div>
             </div>
-            <p className="mt-3 text-xs leading-relaxed text-neutral-500">When a slug is provided, the server validates it now and requests fresh per-wallet calldata during the 10-second pre-arm window. The job and key are encrypted at rest and sensitive execution data is cleared after completion or stopping.</p>
+            <p className="mt-3 text-xs leading-relaxed text-neutral-500">When a slug is provided, the server validates it now and requests fresh per-wallet calldata during the 30-second pre-arm window. The job and key are encrypted at rest and sensitive execution data is cleared after completion or stopping.</p>
           </div>
 
           <div className="pt-4 border-t border-white/5">
