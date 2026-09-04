@@ -441,12 +441,10 @@ export const DropStages = ({
                   const isSelected = selectedStageId === stage.id;
                   const isSimulating = simulatingStage === stage.id;
                   const result = simulationResults[stage.id];
-                  // Upcoming public stages are conservatively returned as projectedEligible
-                  // by the API. Present those wallets in the same simple eligibility view;
-                  // the stage countdown still communicates that minting is not live yet.
-                  const displayedEligible = result
-                    ? [...new Set([...(result.eligible || []), ...(result.projectedEligible || [])])]
-                    : [];
+                  // Only wallets confirmed by the active-stage check belong in the
+                  // Eligible list. The API may keep projected results for internal
+                  // scheduling, but those must never be presented as confirmed access.
+                  const displayedEligible = result?.eligible || [];
 
                   const startDateStr = stage.startTime ? new Date(stage.startTime * 1000).toLocaleString() : 'TBA';
                   const endDateStr = stage.endTime ? new Date(stage.endTime * 1000).toLocaleString() : 'TBA';

@@ -157,7 +157,7 @@ export const Documentation = () => {
           <DocSection id="eligibility" eyebrow="05 / Simulation" title="Understanding eligibility results">
             <p>The checker operates only on wallets explicitly imported in Wallet Manager. Results are shown as either eligible or not eligible. Internal RPC and OpenSea fallback details are kept out of the dashboard while still being recorded in server logs.</p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <Feature icon={CheckCircle2} title="Eligible">The exact call succeeds, or the public-stage configuration and wallet mint statistics prove access before the stage starts.</Feature>
+              <Feature icon={CheckCircle2} title="Eligible">The exact call succeeds against the active stage for the selected execution wallet.</Feature>
               <Feature icon={TriangleAlert} title="Not eligible">A decoded, definitive contract response proves a condition such as wallet limit, invalid voucher, inactive stage, or incorrect payment.</Feature>
             </div>
             <p>Simulation does not broadcast or spend funds. For unfunded wallets, MintGrid may use a supported RPC balance override to distinguish access failure from insufficient balance; the real wallet must still be funded before execution.</p>
