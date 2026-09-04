@@ -156,11 +156,10 @@ export const Documentation = () => {
           </DocSection>
 
           <DocSection id="eligibility" eyebrow="05 / Simulation" title="Understanding eligibility results">
-            <p>The checker operates only on wallets explicitly imported in Wallet Manager. Each result belongs to one of three categories:</p>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <p>The checker operates only on wallets explicitly imported in Wallet Manager. Results are shown as either eligible or not eligible. Internal RPC and OpenSea fallback details are kept out of the dashboard while still being recorded in server logs.</p>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <Feature icon={CheckCircle2} title="Eligible">The exact call succeeds, or the public-stage configuration and wallet mint statistics prove access before the stage starts.</Feature>
               <Feature icon={TriangleAlert} title="Not eligible">A decoded, definitive contract response proves a condition such as wallet limit, invalid voucher, inactive stage, or incorrect payment.</Feature>
-              <Feature icon={Radio} title="Could not verify">RPCs returned generic or conflicting reverts. This is intentionally not converted into a false “not eligible” result.</Feature>
             </div>
             <p>Simulation does not broadcast or spend funds. For unfunded wallets, MintGrid may use a supported RPC balance override to distinguish access failure from insufficient balance; the real wallet must still be funded before execution.</p>
           </DocSection>
@@ -236,7 +235,7 @@ export const Documentation = () => {
             <div className="rounded-2xl border border-white/5 bg-white/[0.02] px-5">
               <Field name="Operation aborted">Usually a temporary browser or RPC network interruption. Retry after connectivity returns; the fallback manager will move past endpoints that report transport failures.</Field>
               <Field name="Stage not active">Confirm chain, phase timestamps, timezone, and contract. A future or ended stage should revert during simulation.</Field>
-              <Field name="Could not verify">Use an OpenSea API key for wallet-specific phases, confirm the exact slug, and inspect the unsigned transaction panel. Do not interpret an inconclusive RPC revert as ineligibility.</Field>
+              <Field name="Eligibility fallback">OpenSea GraphQL and API-key requests are used internally as complementary fallbacks for wallet-specific phases. Confirm the exact slug and chain when a result is not eligible.</Field>
               <Field name="Insufficient balance">Fund the execution wallet for both mint value and the live maximum gas estimate. Eligibility and funding are separate checks.</Field>
               <Field name="Fee recipient restricted">Use OpenSea’s exact action or a fee recipient allowed by the drop configuration. A guessed recipient will revert.</Field>
               <Field name="Transaction pending">Check the explorer, source wallet nonce, and fee cap. For dispersal, a missing earlier nonce can hold later transfers in the queue.</Field>
