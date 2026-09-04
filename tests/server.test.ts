@@ -15,6 +15,7 @@ process.env.DATABASE_PATH = databasePath;
 process.env.SESSION_SECRET = "test-session-secret-that-is-long-and-stable";
 process.env.CONFIG_ENCRYPTION_KEY = "test-config-encryption-key-that-is-long-and-stable";
 process.env.OPENSEA_API_KEY = "test-opensea-key";
+delete process.env.SIWE_DOMAIN;
 
 const { default: app, clearSchedulerMemoryForTest, decodeMintTransaction, restoreSchedulerJobs, runIsolatedSchedulerTasks, withRpcFallback } = await import("../server.ts");
 
