@@ -11,7 +11,6 @@ import {
   Gauge,
   KeyRound,
   Layers3,
-  Radio,
   Rocket,
   ShieldCheck,
   TerminalSquare,
