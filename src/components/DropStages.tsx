@@ -34,6 +34,22 @@ interface StageInfo {
   raw: any;
 }
 
+/** Accept a slug, contract address, or a full OpenSea collection/drop URL. */
+const normalizeOpenSeaReference = (value: string): string => {
+  const input = value.trim();
+  if (!/^https?:\/\//i.test(input)) return input;
+  try {
+    const parts = new URL(input).pathname.split('/').filter(Boolean);
+    const collectionIndex = parts.findIndex((part) => part === 'collection' || part === 'drops' || part === 'drop');
+    if (collectionIndex >= 0 && parts[collectionIndex + 1]) return parts[collectionIndex + 1];
+    const assetIndex = parts.findIndex((part) => part === 'assets');
+    if (assetIndex >= 0 && parts[assetIndex + 2]) return parts[assetIndex + 2];
+    return parts.at(-1) || input;
+  } catch {
+    return input;
+  }
+};
+
 export const DropStages = ({
   wallets,
   addLog,
@@ -169,10 +185,13 @@ export const DropStages = ({
 
   const handleFetchDrop = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!slug) {
-      setError('Please enter an OpenSea collection slug or contract address.');
+    const reference = normalizeOpenSeaReference(slug);
+    if (!reference) {
+      setError('Please enter an OpenSea URL, collection slug, or contract address.');
       return;
     }
+
+    setSlug(reference);
 
     setError('');
     setIsFetching(true);
@@ -181,13 +200,13 @@ export const DropStages = ({
     setSelectedStageId(null);
     setSimulationResults({});
 
-    addLog('SYSTEM', `Fetching drop schedule for ${slug} from OpenSea API...`, 'text-synapse-cyan');
+    addLog('SYSTEM', `Fetching drop schedule for ${reference} from OpenSea API...`, 'text-synapse-cyan');
 
     try {
       const response = await fetch('/api/opensea/drop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slug: slug.trim(), chain: selectedChain, apiKey: apiKey.trim() })
+        body: JSON.stringify({ slug: reference, chain: selectedChain, apiKey: apiKey.trim() })
       });
 
       const data = await response.json();
@@ -210,7 +229,7 @@ export const DropStages = ({
       if (parsed.length > 0) {
         setSelectedStageId(parsed[0].id);
       }
-      addLog('SUCCESS', `Successfully retrieved drop stages for "${data.name || slug}" (${parsed.length} stages found)`, 'text-synapse-emerald');
+      addLog('SUCCESS', `Successfully retrieved drop stages for "${data.name || reference}" (${parsed.length} stages found)`, 'text-synapse-emerald');
     } catch (err: any) {
       setError(err.message);
       addLog('ERROR', `Failed to fetch drop stages: ${err.message}`, 'text-red-500');
@@ -334,14 +353,14 @@ export const DropStages = ({
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div>
             <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">
-              OpenSea Drop Slug
+              OpenSea URL, Slug, or Contract
             </label>
             <input
               type="text"
               value={slug}
               onChange={(e) => setSlug(e.target.value)}
               className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors"
-              placeholder="e.g. cyber-samurai-drop"
+              placeholder="https://opensea.io/collection/example"
               required
             />
           </div>
