@@ -13,6 +13,7 @@ import { LiveTransactionFee } from '../components/LiveTransactionFee';
 import { resolveChain } from '../lib/chains';
 
 const MAX_SNIPER_WORKERS = 24;
+const MAX_CLIENT_LOGS = 250;
 const CONFIG_SAVE_DELAY_MS = 700;
 const WALLET_SAVE_DELAY_MS = 500;
 
@@ -91,6 +92,7 @@ export const Dashboard = () => {
   const configSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const walletSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const configSaveErrorLogged = useRef(false);
+  const logsEndRef = useRef<HTMLDivElement | null>(null);
 
   const [logs, setLogs] = useState<{ time: string; type: string; message: string; color: string }[]>([
     { time: new Date().toLocaleTimeString(), type: 'SYSTEM', message: 'Terminal initialized. Ready for instructions.', color: 'text-neutral-500' }
@@ -98,8 +100,12 @@ export const Dashboard = () => {
   const [isSniping, setIsSniping] = useState(false);
 
   const addLog = (type: string, message: string, color: string) => {
-    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type, message, color }]);
+    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type, message, color }].slice(-MAX_CLIENT_LOGS));
   };
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [logs, isSniping]);
 
   const clearAuth = () => {
     localStorage.removeItem('auth_token');
@@ -710,19 +716,20 @@ export const Dashboard = () => {
           </div>
 
           {/* Terminal Section */}
-          <div className="lg:col-span-7 h-[600px] lg:h-auto overflow-hidden rounded-[24px] border border-white/10 bg-[#080808]/90 shadow-2xl flex flex-col">
+          <div className="lg:col-span-7 h-[600px] overflow-hidden rounded-[24px] border border-white/10 bg-[#080808]/90 shadow-2xl flex flex-col">
             <div className="flex items-center justify-between border-b border-white/10 bg-white/5 px-6 py-4">
               <div className="flex items-center gap-3">
                 <Terminal size={16} className="text-neutral-400" />
                 <span className="font-mono text-xs font-semibold uppercase tracking-widest text-neutral-400">Execution Logs</span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={() => setLogs([])} className="font-mono text-[10px] uppercase tracking-widest text-neutral-500 transition-colors hover:text-white">Clear</button>
                 <div className="h-3 w-3 rounded-full bg-red-500/80" />
                 <div className="h-3 w-3 rounded-full bg-yellow-500/80" />
                 <div className="h-3 w-3 rounded-full bg-green-500/80" />
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-6 font-mono text-xs leading-loose text-neutral-300 md:text-sm">
+            <div className="min-h-0 flex-1 overflow-y-auto p-6 font-mono text-xs leading-loose text-neutral-300 md:text-sm">
               {logs.map((log, index) => (
                 <div key={index} className="mb-2 flex items-start gap-4">
                   <span className="text-neutral-600 shrink-0">[{log.time}]</span>
@@ -737,6 +744,7 @@ export const Dashboard = () => {
                   <span>Awaiting network response...</span>
                 </div>
               )}
+              <div ref={logsEndRef} />
             </div>
           </div>
 
