@@ -2019,6 +2019,7 @@ interface SchedulerJob {
   mode: "public" | "allowlist";
   quantity: number;
   parallelWorkers: number;
+  retryOnFailure: boolean;
   openSea?: {
     slug: string;
     apiKey: string;
@@ -2111,6 +2112,7 @@ function schedulerPublic(job: SchedulerJob) {
     armAttempts: job.armAttempts,
     walletCount: job.walletCount,
     parallelWorkers: job.parallelWorkers,
+    retryOnFailure: job.retryOnFailure,
     wallets: job.wallets.map((wallet) => ({
       id: wallet.id,
       name: wallet.name,
@@ -2186,6 +2188,7 @@ export function restoreSchedulerJobs() {
         ...stored,
         chain,
         parallelWorkers: Math.max(1, Math.min(MAX_SCHEDULER_WORKERS, Number(stored.parallelWorkers) || 1)),
+        retryOnFailure: Boolean(stored.retryOnFailure),
         plan: stored.plan
           ? {
               ...stored.plan,
@@ -2438,7 +2441,7 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
 
 async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
   if (job.status !== "pending") return;
-  job.status = "running";
+    job.status = "running";
   job.updatedAt = new Date().toISOString();
   persistSchedulerJob(job);
   try {
@@ -2451,40 +2454,54 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
       }
       if (job.arming === activeArming) job.arming = undefined;
     }
-    await armSchedulerJob(job, true);
-    if (job.stopRequested) {
-      job.status = "stopped";
-      job.wallets.forEach((wallet) => {
-        if (!["completed", "failed"].includes(wallet.status)) wallet.status = "stopped";
-      });
-      return;
-    }
-    const readyWallets = job.wallets.filter(
-      (wallet) => wallet.status === "ready" && Boolean(wallet.signedTransaction),
-    );
-    if (!readyWallets.length) throw new Error(job.error || "No scheduled wallet could be prepared");
-    readyWallets.forEach((wallet) => (wallet.status = "broadcasting"));
-    persistSchedulerJob(job);
-    const settled = await runSchedulerWorkerPool(
-      readyWallets,
-      job.parallelWorkers,
-      (wallet) => broadcastSignedTransaction(wallet.signedTransaction!, job.chain, job.endpoints),
-    );
-    settled.forEach((result, index) => {
-      const wallet = readyWallets[index];
-      if (result.status === "fulfilled") {
-        wallet.status = "completed";
-        wallet.txHash = result.value.txHash;
-        wallet.acceptedBy = result.value.acceptedBy;
-        wallet.acceptedAt = result.value.acceptedAt;
-        wallet.submissionLatencyMs = result.value.submissionLatencyMs;
-        wallet.targetOffsetMs = job.targetTime === undefined ? undefined : Date.parse(result.value.acceptedAt) - job.targetTime;
-        wallet.error = undefined;
-      } else {
-        wallet.status = "failed";
-        wallet.error = errorMessage(result.reason).slice(0, 300);
+    const retryDeadline = Date.now() + 5 * 60_000;
+    while (true) {
+      await armSchedulerJob(job, true);
+      if (job.stopRequested) {
+        job.status = "stopped";
+        job.wallets.forEach((wallet) => {
+          if (!["completed", "failed"].includes(wallet.status)) wallet.status = "stopped";
+        });
+        return;
       }
-    });
+      const readyWallets = job.wallets.filter(
+        (wallet) => wallet.status === "ready" && Boolean(wallet.signedTransaction),
+      );
+      if (readyWallets.length) {
+        readyWallets.forEach((wallet) => (wallet.status = "broadcasting"));
+        persistSchedulerJob(job);
+        const settled = await runSchedulerWorkerPool(
+          readyWallets,
+          job.parallelWorkers,
+          (wallet) => broadcastSignedTransaction(wallet.signedTransaction!, job.chain, job.endpoints),
+        );
+        settled.forEach((result, index) => {
+          const wallet = readyWallets[index];
+          if (result.status === "fulfilled") {
+            wallet.status = "completed";
+            wallet.txHash = result.value.txHash;
+            wallet.acceptedBy = result.value.acceptedBy;
+            wallet.acceptedAt = result.value.acceptedAt;
+            wallet.submissionLatencyMs = result.value.submissionLatencyMs;
+            wallet.targetOffsetMs = job.targetTime === undefined ? undefined : Date.parse(result.value.acceptedAt) - job.targetTime;
+            wallet.error = undefined;
+          } else {
+            wallet.status = "failed";
+            wallet.error = errorMessage(result.reason).slice(0, 300);
+          }
+        });
+      }
+      const failedNow = job.wallets.filter((wallet) => wallet.status === "failed");
+      if (!job.retryOnFailure || !failedNow.length || Date.now() >= retryDeadline) break;
+      failedNow.forEach((wallet) => {
+        wallet.status = "queued";
+        wallet.signedTransaction = undefined;
+      });
+      job.error = `Retrying ${failedNow.length} failed wallet(s) in 2 seconds`;
+      job.updatedAt = new Date().toISOString();
+      persistSchedulerJob(job);
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
     const completed = job.wallets.filter((wallet) => wallet.status === "completed");
     const failed = job.wallets.filter((wallet) => wallet.status === "failed");
     job.result = {
@@ -4174,6 +4191,7 @@ app.post(
     }
     // Automatically use one worker per selected wallet, capped at the scheduler limit.
     const parallelWorkers = Math.max(1, Math.min(MAX_SCHEDULER_WORKERS, wallets.length));
+    const retryOnFailure = body.retryOnFailure === true;
     const requestedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
     let chain: ChainConfig;
     let endpoints: string[];
@@ -4230,6 +4248,7 @@ app.post(
       mode,
       quantity,
       parallelWorkers,
+      retryOnFailure,
       openSea,
       wallets,
       walletCount: wallets.length,

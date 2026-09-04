@@ -43,6 +43,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
   const [form, setForm] = useState({
     contractAddress: '',
     quantity: '1',
+    retryOnFailure: false,
     openSeaSlug: '',
     openSeaApiKey: '',
     isAllowlist: false,
@@ -148,6 +149,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         targetTime: scheduledDate.toISOString(),
         contractAddress: form.contractAddress,
         quantity: Number(form.quantity),
+        retryOnFailure: form.retryOnFailure,
         isAllowlist: form.isAllowlist,
         mintParams: mintParamsObj,
         salt: form.salt,
@@ -179,6 +181,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
       setForm({
         contractAddress: '',
         quantity: '1',
+        retryOnFailure: false,
         openSeaSlug: '',
         openSeaApiKey: savedOpenSeaApiKey || '',
         isAllowlist: false,
@@ -402,6 +405,19 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
             </label>
             <p className="text-xs text-neutral-500">With an OpenSea slug, signatures are fetched automatically per wallet. Without a slug, you must provide the manual voucher below.</p>
           </div>
+
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-4">
+            <input
+              type="checkbox"
+              checked={form.retryOnFailure}
+              onChange={(e) => setForm({...form, retryOnFailure: e.target.checked})}
+              className="mt-0.5 h-4 w-4 accent-yellow-500"
+            />
+            <span>
+              <span className="block text-sm font-medium text-yellow-300">Retry failed wallets every 2 seconds</span>
+              <span className="mt-1 block text-xs text-neutral-500">Successful wallets are never repeated. Retries run for up to 5 minutes and stop automatically when the job is no longer actionable.</span>
+            </span>
+          </label>
 
           <LiveTransactionFee
             selectedChain={selectedChain}
