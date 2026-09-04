@@ -1480,6 +1480,9 @@ async function openSeaGraphqlEligibility(
       throw new Error(`GraphQL eligibility unavailable (HTTP ${response.status})`);
     }
     const stages = payload.data.dropBySlug.stages as Array<Record<string, any>>;
+    if (stageIndex === undefined || !Number.isSafeInteger(stageIndex)) {
+      return { eligible: false, definitive: false, reason: "OpenSea stage index was not provided" };
+    }
     const relevant = stages.filter((stage) => {
       const type = String(stage.stageType || "").toUpperCase();
       const matchesType = mode === "public" ? type === "PUBLIC_SALE" : ["SIGNED_PRESALE", "MERKLE_PRESALE"].includes(type);
