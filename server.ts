@@ -2197,6 +2197,7 @@ function schedulerPublic(job: SchedulerJob) {
     walletCount: job.walletCount,
     parallelWorkers: job.parallelWorkers,
     retryOnFailure: job.retryOnFailure,
+    quantity: job.quantity,
     wallets: job.wallets.map((wallet) => ({
       id: wallet.id,
       name: wallet.name,
@@ -4392,6 +4393,9 @@ app.put("/api/scheduler/jobs/:id", (req, res) => {
     throw new ApiError(409, `Only queued or paused jobs can be edited (current status: ${job.status})`);
   }
   const body = (req.body || {}) as Record<string, any>;
+  if (body.retryOnFailure !== undefined && typeof body.retryOnFailure !== "boolean") {
+    throw new ApiError(400, "retryOnFailure must be a boolean");
+  }
   if (body.targetTime !== undefined) {
     const targetTime = parseTargetTime(body.targetTime);
     if (targetTime === undefined || targetTime <= Date.now() + 250) {
@@ -4401,6 +4405,7 @@ app.put("/api/scheduler/jobs/:id", (req, res) => {
     job.targetBlock = undefined;
   }
   if (body.quantity !== undefined) job.quantity = requireQuantity(body.quantity);
+  if (body.retryOnFailure !== undefined) job.retryOnFailure = body.retryOnFailure;
   job.wallets.forEach((wallet) => {
     wallet.status = "queued";
     wallet.signedTransaction = undefined;

@@ -34,6 +34,8 @@ interface SchedulerJobSummary {
   error?: string;
   wallets?: Array<{ id: string; name: string; address: string; status: string; txHash?: string; error?: string }>;
   parallelWorkers?: number;
+  retryOnFailure: boolean;
+  quantity: number;
 }
 
 export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, savedOpenSeaApiKey, onOpenSeaApiKeyChange, initialDraft }: ScheduledMintingProps) => {
@@ -164,7 +166,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
       const response = await fetch(editingJobId ? `/api/scheduler/jobs/${editingJobId}` : '/api/scheduler/create', {
         method: editingJobId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-        body: JSON.stringify(editingJobId ? { targetTime: payload.targetTime, quantity: payload.quantity } : payload)
+        body: JSON.stringify(editingJobId ? { targetTime: payload.targetTime, quantity: payload.quantity, retryOnFailure: payload.retryOnFailure } : payload)
       });
 
       const data = await response.json();
@@ -205,7 +207,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
     setEditingJobId(job.id);
     setScheduledJob(null);
     setTargetTime(local);
-    setForm((current) => ({ ...current, contractAddress: job.contractAddress }));
+    setForm((current) => ({ ...current, contractAddress: job.contractAddress, quantity: String(job.quantity), retryOnFailure: job.retryOnFailure }));
     setSelectedWalletIds(new Set((job.wallets || []).map((wallet) => wallet.id)));
     setError('');
   };

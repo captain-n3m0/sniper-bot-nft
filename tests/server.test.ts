@@ -175,15 +175,27 @@ test("scheduler jobs are owner-scoped, durable, and controllable", async () => {
     const edited = await request(`/api/scheduler/jobs/${id}`, {
       method: "PUT",
       token,
-      body: { targetTime: new Date(Date.now() + 120_000).toISOString(), quantity: 2 },
+      body: { targetTime: new Date(Date.now() + 120_000).toISOString(), quantity: 2, retryOnFailure: true },
     });
     assert.equal(edited.status, 200);
     assert.equal(edited.body.job.status, "paused");
+    assert.equal(edited.body.job.retryOnFailure, true);
+    assert.equal(edited.body.job.quantity, 2);
+    const omitted = await request(`/api/scheduler/jobs/${id}`, { method: "PUT", token, body: { quantity: 2 } });
+    assert.equal(omitted.body.job.retryOnFailure, true);
+    const invalid = await request(`/api/scheduler/jobs/${id}`, { method: "PUT", token, body: { retryOnFailure: "false" } });
+    assert.equal(invalid.status, 400);
     clearSchedulerMemoryForTest();
     restoreSchedulerJobs();
     const restored = await request("/api/scheduler/jobs", { token });
     assert.equal(restored.body.jobs[0].id, id);
     assert.equal(restored.body.jobs[0].status, "paused");
+    assert.equal(restored.body.jobs[0].retryOnFailure, true);
+    const disabled = await request(`/api/scheduler/jobs/${id}`, { method: "PUT", token, body: { retryOnFailure: false } });
+    assert.equal(disabled.body.job.retryOnFailure, false);
+    clearSchedulerMemoryForTest();
+    restoreSchedulerJobs();
+    assert.equal((await request("/api/scheduler/jobs", { token })).body.jobs[0].retryOnFailure, false);
     assert.equal((await request(`/api/scheduler/jobs/${id}/resume`, { method: "POST", token })).body.job.status, "pending");
     assert.equal((await request(`/api/scheduler/jobs/${id}/stop`, { method: "POST", token })).body.job.status, "stopped");
 
