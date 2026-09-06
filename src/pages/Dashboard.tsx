@@ -28,6 +28,7 @@ interface SniperFormState {
   signature: string;
   openSeaSlug: string;
   openSeaApiKey: string;
+  feeTier: 'slow' | 'standard' | 'fast';
 }
 
 const DEFAULT_SNIPER_FORM: SniperFormState = {
@@ -39,6 +40,7 @@ const DEFAULT_SNIPER_FORM: SniperFormState = {
   signature: '',
   openSeaSlug: '',
   openSeaApiKey: '',
+  feeTier: 'fast',
 };
 
 const shortAddress = (address: string) => `${address.slice(0, 6)}...${address.slice(-4)}`;
@@ -71,6 +73,7 @@ const persistedConfig = (selectedChain: string, form: SniperFormState, activeTab
     isAllowlist: form.isAllowlist,
     openSeaSlug: form.openSeaSlug,
     openSeaApiKey: form.openSeaApiKey,
+    feeTier: form.feeTier,
   }
 });
 
@@ -158,6 +161,7 @@ export const Dashboard = () => {
           isAllowlist: typeof remoteSniper.isAllowlist === 'boolean' ? remoteSniper.isAllowlist : false,
           openSeaSlug: textConfig(remoteSniper.openSeaSlug),
           openSeaApiKey: textConfig(remoteSniper.openSeaApiKey),
+          feeTier: ['slow', 'standard', 'fast'].includes(String(remoteSniper.feeTier)) ? remoteSniper.feeTier : 'fast',
         };
         const nextChain = chainConfig(remoteConfig.selectedChain);
         const nextTab = tabConfig(remoteConfig.activeTab);
@@ -306,7 +310,7 @@ export const Dashboard = () => {
           signature: form.signature,
           slug: form.openSeaSlug || undefined,
           openseaApiKey: form.openSeaApiKey || undefined,
-          feeTier: 'fast'
+          feeTier: form.feeTier
         };
 
         const prepareRes = await fetch('/api/prepare-mint', {
@@ -537,6 +541,20 @@ export const Dashboard = () => {
                 </div>
 
                 <div>
+                  <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Gas Priority</label>
+                  <select
+                    value={form.feeTier}
+                    onChange={(e) => setForm({ ...form, feeTier: e.target.value as SniperFormState['feeTier'] })}
+                    className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm uppercase text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors [color-scheme:dark]"
+                  >
+                    <option value="slow">Slow · lower priority</option>
+                    <option value="standard">Standard · balanced</option>
+                    <option value="fast">Aggressive · highest priority</option>
+                  </select>
+                  <p className="mt-2 text-xs text-neutral-500">Controls the EIP-1559 priority fee used for this mint.</p>
+                </div>
+
+                <div>
                   <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">OpenSea API Key</label>
                   <input
                     type="password"
@@ -602,6 +620,7 @@ export const Dashboard = () => {
                   valueWei={mintFeeBasis.valueWei}
                   exactGasLimit={mintFeeBasis.exact}
                   walletCount={selectedSniperWallets.size}
+                  feeTier={form.feeTier}
                 />
 
                 <div className="pt-6">

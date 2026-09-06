@@ -36,6 +36,7 @@ interface SchedulerJobSummary {
   parallelWorkers?: number;
   retryOnFailure: boolean;
   quantity?: number;
+  feeTier?: 'slow' | 'standard' | 'fast';
 }
 
 export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, savedOpenSeaApiKey, onOpenSeaApiKeyChange, initialDraft }: ScheduledMintingProps) => {
@@ -45,6 +46,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
   const [form, setForm] = useState({
     contractAddress: '',
     quantity: '1',
+    feeTier: 'fast' as const,
     retryOnFailure: false,
     openSeaSlug: '',
     openSeaApiKey: '',
@@ -55,7 +57,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
   });
 
   const [isScheduling, setIsScheduling] = useState(false);
-  const [scheduledJob, setScheduledJob] = useState<{taskId: string, targetTime: string, walletCount: number, chain: string, source?: string, openSeaSlug?: string} | null>(null);
+  const [scheduledJob, setScheduledJob] = useState<{taskId: string, targetTime: string, walletCount: number, chain: string, source?: string, openSeaSlug?: string, quantity?: number, feeTier?: string} | null>(null);
   const [error, setError] = useState('');
   const [jobs, setJobs] = useState<SchedulerJobSummary[]>([]);
   const [jobsLoading, setJobsLoading] = useState(false);
@@ -156,6 +158,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         targetTime: scheduledDate.toISOString(),
         contractAddress: form.contractAddress,
         quantity: requestedQuantity,
+        feeTier: form.feeTier,
         retryOnFailure: form.retryOnFailure,
         isAllowlist: form.isAllowlist,
         mintParams: mintParamsObj,
@@ -163,7 +166,6 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         signature: form.signature,
         slug: form.openSeaSlug.trim() || undefined,
         openseaApiKey: form.openSeaApiKey.trim() || undefined,
-        feeTier: 'fast',
         wallets: Array.from(selectedWalletIds).map(id => wallets.find(w => w.id === id)),
         chain: selectedChain
       };
@@ -171,7 +173,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
       const response = await fetch(editingJobId ? `/api/scheduler/jobs/${editingJobId}` : '/api/scheduler/create', {
         method: editingJobId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-        body: JSON.stringify(editingJobId ? { targetTime: payload.targetTime, quantity: payload.quantity, retryOnFailure: payload.retryOnFailure } : payload)
+        body: JSON.stringify(editingJobId ? { targetTime: payload.targetTime, quantity: payload.quantity, retryOnFailure: payload.retryOnFailure, feeTier: payload.feeTier } : payload)
       });
 
       const data = await response.json();
@@ -188,6 +190,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
       setForm({
         contractAddress: '',
         quantity: '1',
+        feeTier: 'fast',
         retryOnFailure: false,
         openSeaSlug: '',
         openSeaApiKey: savedOpenSeaApiKey || '',
@@ -212,7 +215,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
     setEditingJobId(job.id);
     setScheduledJob(null);
     setTargetTime(local);
-    setForm((current) => ({ ...current, contractAddress: job.contractAddress, quantity: String(job.quantity), retryOnFailure: job.retryOnFailure }));
+    setForm((current) => ({ ...current, contractAddress: job.contractAddress, quantity: String(job.quantity ?? 1), retryOnFailure: job.retryOnFailure, feeTier: job.feeTier || 'fast' }));
     setSelectedWalletIds(new Set((job.wallets || []).map((wallet) => wallet.id)));
     setError('');
   };
@@ -363,6 +366,19 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                 required
               />
             </div>
+            <div>
+              <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Gas Priority</label>
+              <select
+                value={form.feeTier}
+                onChange={(e) => setForm({ ...form, feeTier: e.target.value as typeof form.feeTier })}
+                className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm uppercase text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors [color-scheme:dark]"
+              >
+                <option value="slow">Slow · lower priority</option>
+                <option value="standard">Standard · balanced</option>
+                <option value="fast">Aggressive · highest priority</option>
+              </select>
+              <p className="mt-2 text-xs text-neutral-500">Controls the EIP-1559 priority fee used at the scheduled time.</p>
+            </div>
           </div>
 
           <p className="text-xs text-neutral-500">Worker count is automatic: one concurrent worker per selected wallet, up to 50 wallets.</p>
@@ -433,6 +449,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
             valueWei={null}
             exactGasLimit={false}
             walletCount={selectedWalletIds.size}
+            feeTier={form.feeTier}
           />
 
           {form.isAllowlist && !form.openSeaSlug.trim() && (

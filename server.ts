@@ -903,6 +903,14 @@ interface FeeSnapshot {
   maxFeePerGas: bigint;
 }
 
+type FeeTier = "slow" | "standard" | "fast";
+
+function feeTierFrom(value: unknown): FeeTier {
+  const tier = String(value || "fast").toLowerCase();
+  if (tier === "slow" || tier === "standard" || tier === "fast") return tier;
+  throw new ApiError(400, "feeTier must be slow, standard, or fast");
+}
+
 async function getFeeSnapshot(provider: JsonRpcProvider): Promise<FeeSnapshot> {
   const [block, feeData] = await Promise.all([provider.getBlock("latest"), provider.getFeeData()]);
   const baseFeePerGas = block?.baseFeePerGas || feeData.gasPrice || 0n;
@@ -1223,6 +1231,7 @@ async function signTransactionPayload(
   privateKey: unknown,
   chain: ChainConfig,
   endpoints: string[],
+  feeTier: FeeTier = "fast",
 ): Promise<string> {
   const wallet = walletFromPrivateKey(privateKey);
   const input = transactionInput(inputValue, chain);
@@ -1237,7 +1246,7 @@ async function signTransactionPayload(
       endpoints,
       { to: input.to, data: input.data, value: input.value },
       wallet,
-      "fast",
+      feeTier,
     );
     input.nonce ??= hydrated.nonce;
     input.gasLimit ??= BigInt(hydrated.gasLimit);
@@ -2102,6 +2111,7 @@ interface SchedulerJob {
   contractAddress: string;
   mode: "public" | "allowlist";
   quantity: number;
+  feeTier: FeeTier;
   parallelWorkers: number;
   retryOnFailure: boolean;
   openSea?: {
@@ -2198,6 +2208,7 @@ function schedulerPublic(job: SchedulerJob) {
     parallelWorkers: job.parallelWorkers,
     retryOnFailure: job.retryOnFailure,
     quantity: job.quantity,
+    feeTier: job.feeTier,
     wallets: job.wallets.map((wallet) => ({
       id: wallet.id,
       name: wallet.name,
@@ -2274,6 +2285,7 @@ export function restoreSchedulerJobs() {
         chain,
         parallelWorkers: Math.max(1, Math.min(MAX_SCHEDULER_WORKERS, Number(stored.parallelWorkers) || 1)),
         retryOnFailure: Boolean(stored.retryOnFailure),
+        feeTier: feeTierFrom(stored.feeTier),
         plan: stored.plan
           ? {
               ...stored.plan,
@@ -2395,7 +2407,7 @@ async function scheduledOpenSeaTransaction(job: SchedulerJob, privateKey: string
     job.endpoints,
     transaction,
     wallet,
-    "fast",
+    job.feeTier,
   );
   if (
     !prepared.simulation.ok &&
@@ -2475,6 +2487,7 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
                 wallet.privateKey,
                 job.chain,
                 job.endpoints,
+                job.feeTier,
               );
             })();
         return { wallet, signedTransaction };
@@ -4280,6 +4293,7 @@ app.post(
     // Automatically use one worker per selected wallet, capped at the scheduler limit.
     const parallelWorkers = Math.max(1, Math.min(MAX_SCHEDULER_WORKERS, wallets.length));
     const retryOnFailure = body.retryOnFailure === true;
+    const feeTier = feeTierFrom(body.feeTier);
     const requestedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
     let chain: ChainConfig;
     let endpoints: string[];
@@ -4335,6 +4349,7 @@ app.post(
       contractAddress,
       mode,
       quantity,
+      feeTier,
       parallelWorkers,
       retryOnFailure,
       openSea,
@@ -4405,6 +4420,7 @@ app.put("/api/scheduler/jobs/:id", (req, res) => {
     job.targetBlock = undefined;
   }
   if (body.quantity !== undefined) job.quantity = requireQuantity(body.quantity);
+  if (body.feeTier !== undefined) job.feeTier = feeTierFrom(body.feeTier);
   if (body.retryOnFailure !== undefined) job.retryOnFailure = body.retryOnFailure;
   job.wallets.forEach((wallet) => {
     wallet.status = "queued";
