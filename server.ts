@@ -3334,6 +3334,17 @@ interface RequestMetricBucket {
 
 const requestMetricBuckets = new Map<number, RequestMetricBucket>();
 const endpointMetrics = new Map<string, { requests: number; errors: number; durationMs: number }>();
+interface UserActivityMetric {
+  address: string;
+  lastSeenAt: number;
+  requests: number;
+  errors: number;
+  durationMs: number;
+  endpoints: Map<string, { requests: number; errors: number; durationMs: number }>;
+}
+
+const userActivityMetrics = new Map<string, UserActivityMetric>();
+const ACTIVE_USER_WINDOW_MS = 15 * 60_000;
 let totalApiRequests = 0;
 let totalApiErrors = 0;
 let totalApiDurationMs = 0;
@@ -3345,8 +3356,18 @@ function normalizedMetricPath(req: Request) {
     .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id");
 }
 
+function sessionFromRequest(req: Request): AuthenticatedSession | undefined {
+  const bearer = (req.get("authorization") || "").match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!bearer) return undefined;
+  try {
+    return verifySessionToken(bearer);
+  } catch {
+    return undefined;
+  }
+}
+
 function recordRequestMetric(req: Request, status: number, durationMs: number) {
-  if (!req.path.startsWith("/api/") || ["/api/metrics", "/api/status", "/api/health"].includes(req.path)) return;
+  if (!req.path.startsWith("/api/") || ["/api/metrics", "/api/admin/metrics", "/api/status", "/api/health"].includes(req.path)) return;
   totalApiRequests += 1;
   totalApiDurationMs += durationMs;
   if (status >= 400) totalApiErrors += 1;
@@ -3373,6 +3394,32 @@ function recordRequestMetric(req: Request, status: number, durationMs: number) {
   endpoint.durationMs += durationMs;
   if (status >= 400) endpoint.errors += 1;
   endpointMetrics.set(path, endpoint);
+
+  const session = sessionFromRequest(req);
+  if (!session) return;
+  const now = Date.now();
+  const user = userActivityMetrics.get(session.addressKey) || {
+    address: session.address,
+    lastSeenAt: now,
+    requests: 0,
+    errors: 0,
+    durationMs: 0,
+    endpoints: new Map<string, { requests: number; errors: number; durationMs: number }>(),
+  };
+  user.address = session.address;
+  user.lastSeenAt = now;
+  user.requests += 1;
+  user.durationMs += durationMs;
+  if (status >= 400) user.errors += 1;
+  const userEndpoint = user.endpoints.get(path) || { requests: 0, errors: 0, durationMs: 0 };
+  userEndpoint.requests += 1;
+  userEndpoint.durationMs += durationMs;
+  if (status >= 400) userEndpoint.errors += 1;
+  user.endpoints.set(path, userEndpoint);
+  userActivityMetrics.set(session.addressKey, user);
+  for (const [key, value] of userActivityMetrics) {
+    if (value.lastSeenAt < now - 24 * 60 * 60_000) userActivityMetrics.delete(key);
+  }
 }
 
 function metricSeries(minutes = 60) {
@@ -3388,6 +3435,65 @@ function metricSeries(minutes = 60) {
       maxLatencyMs: bucket?.maxLatencyMs || 0,
     };
   });
+}
+
+function adminMetricsSnapshot() {
+  const now = Date.now();
+  const users = [...userActivityMetrics.values()]
+    .map((user) => ({
+      address: user.address,
+      lastSeenAt: new Date(user.lastSeenAt).toISOString(),
+      active: user.lastSeenAt >= now - ACTIVE_USER_WINDOW_MS,
+      requests: user.requests,
+      errors: user.errors,
+      averageLatencyMs: user.requests ? Math.round(user.durationMs / user.requests) : 0,
+      topEndpoints: [...user.endpoints.entries()]
+        .map(([path, metric]) => ({ path, ...metric, averageLatencyMs: metric.requests ? Math.round(metric.durationMs / metric.requests) : 0 }))
+        .sort((left, right) => right.requests - left.requests)
+        .slice(0, 5),
+    }))
+    .sort((left, right) => Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt));
+  let knownUsers = 0;
+  let storedWallets = 0;
+  let accessGrants = 0;
+  try {
+    const db = database();
+    knownUsers = Number((db.prepare("SELECT COUNT(*) AS count FROM users").get() as { count?: number })?.count || 0);
+    storedWallets = Number((db.prepare("SELECT COUNT(*) AS count FROM user_wallets").get() as { count?: number })?.count || 0);
+    accessGrants = Number((db.prepare("SELECT COUNT(*) AS count FROM access_grants WHERE enabled = 1").get() as { count?: number })?.count || 0);
+  } catch (error) {
+    logServerError("admin-metrics-database", error);
+  }
+  const jobs = [...schedulerJobs.values()];
+  const transactions = [...broadcasts.values()];
+  return {
+    generatedAt: new Date().toISOString(),
+    uptimeSeconds: Math.floor((Date.now() - PROCESS_STARTED_AT) / 1_000),
+    users: { active: users.filter((user) => user.active).length, observed: users.length, known: knownUsers, accessGrants, storedWallets, records: users },
+    requests: { total: totalApiRequests, errors: totalApiErrors, successRate: totalApiRequests ? Number((((totalApiRequests - totalApiErrors) / totalApiRequests) * 100).toFixed(2)) : 100, averageLatencyMs: totalApiRequests ? Math.round(totalApiDurationMs / totalApiRequests) : 0 },
+    series: metricSeries(60),
+    topEndpoints: [...endpointMetrics.entries()]
+      .map(([path, metric]) => ({ path, ...metric, averageLatencyMs: metric.requests ? Math.round(metric.durationMs / metric.requests) : 0 }))
+      .sort((left, right) => right.requests - left.requests)
+      .slice(0, 12),
+    rpc: CHAINS.map((chain) => {
+      const health = rpcUrlsFor(chain).map((url) => rpcHealth.get(url)).filter(Boolean) as RpcHealth[];
+      const successes = health.reduce((sum, item) => sum + item.successes, 0);
+      const failures = health.reduce((sum, item) => sum + item.failures, 0);
+      const latencies = health.map((item) => item.lastLatencyMs).filter((value): value is number => typeof value === "number");
+      return { key: chain.key, name: chain.name, successes, failures, successRate: successes + failures ? Number(((successes / (successes + failures)) * 100).toFixed(2)) : null, lastLatencyMs: latencies.length ? Math.min(...latencies) : null };
+    }),
+    activity: {
+      broadcasts: transactions.length,
+      confirmedTransactions: transactions.filter((transaction) => transaction.state === "confirmed").length,
+      revertedTransactions: transactions.filter((transaction) => transaction.state === "reverted").length,
+      runningJobs: jobs.filter((job) => job.status === "running").length,
+      queuedJobs: jobs.filter((job) => ["pending", "paused"].includes(job.status)).length,
+      completedJobs: jobs.filter((job) => job.status === "completed").length,
+      failedJobs: jobs.filter((job) => job.status === "failed").length,
+    },
+    runtime: { node: process.version, rssBytes: process.memoryUsage().rss, heapUsedBytes: process.memoryUsage().heapUsed },
+  };
 }
 
 function databaseOperational() {
@@ -3706,6 +3812,15 @@ app.get(
       capabilities: BOT_CAPABILITIES,
       grants: rows.map(publicAccessGrant),
     });
+  }),
+);
+
+app.get(
+  "/api/admin/metrics",
+  asyncRoute(async (req, res) => {
+    requireAdmin(req);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, ...adminMetricsSnapshot() });
   }),
 );
 
