@@ -32,7 +32,7 @@ interface SchedulerJobSummary {
   walletCount: number;
   source: string;
   error?: string;
-  wallets?: Array<{ id: string; name: string; address: string; status: string; txHash?: string; error?: string }>;
+  wallets?: Array<{ id: string; name: string; address: string; status: string; txHash?: string; error?: string; submissionLatencyMs?: number; targetOffsetMs?: number }>;
   parallelWorkers?: number;
   retryOnFailure: boolean;
   quantity?: number;
@@ -282,7 +282,11 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                     {job.wallets!.map((wallet) => (
                       <div key={wallet.id} className="flex items-center justify-between gap-3 text-[10px]">
                         <span className="truncate text-neutral-400">{wallet.name} · {wallet.address.slice(0, 6)}…{wallet.address.slice(-4)}</span>
-                        <span className={wallet.status === 'completed' ? 'text-emerald-400' : wallet.status === 'failed' ? 'text-red-400' : 'text-neutral-500'}>{wallet.status}</span>
+                        <span className="shrink-0 text-right">
+                          <span className={wallet.status === 'completed' ? 'text-emerald-400' : wallet.status === 'failed' ? 'text-red-400' : 'text-neutral-500'}>{wallet.status}</span>
+                          {wallet.submissionLatencyMs !== undefined && <span className="ml-2 text-neutral-500">{wallet.submissionLatencyMs} ms RPC</span>}
+                          {wallet.targetOffsetMs !== undefined && <span className="ml-2 text-neutral-600">({wallet.targetOffsetMs >= 0 ? '+' : ''}{wallet.targetOffsetMs} ms target)</span>}
+                        </span>
                       </div>
                     ))}
                   </div>

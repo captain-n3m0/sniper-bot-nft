@@ -295,6 +295,7 @@ export const Dashboard = () => {
         .filter((wallet): wallet is StoredWallet => Boolean(wallet));
 
       const prepareAndBlast = async (wallet: StoredWallet | undefined, workerId = 1) => {
+        const executionStartedAt = performance.now();
         const walletLabel = wallet ? `${wallet.name} (${shortAddress(wallet.address)})` : 'dry-run wallet';
         if (wallet) {
           addLog('INFO', `[worker ${workerId}] Preparing ${walletLabel}`, 'text-synapse-cyan');
@@ -368,8 +369,9 @@ export const Dashboard = () => {
         if (!blastRes.ok || !blasted.success) {
           throw new Error(blasted.error || 'Failed to broadcast mint transaction');
         }
-        addLog('SUCCESS', `[worker ${workerId}] ${wallet.name} broadcasted. Hash: ${blasted.txHash}`, 'text-synapse-emerald');
-        return { ok: true, wallet, txHash: blasted.txHash };
+        const executionMs = Math.round(performance.now() - executionStartedAt);
+        addLog('SUCCESS', `[worker ${workerId}] ${wallet.name} accepted by RPC in ${executionMs} ms. Hash: ${blasted.txHash}`, 'text-synapse-emerald');
+        return { ok: true, wallet, txHash: blasted.txHash, executionMs };
       };
 
       if (activeWallets.length === 0) {
@@ -385,7 +387,7 @@ export const Dashboard = () => {
       );
 
       let nextWalletIndex = 0;
-      const results: Array<{ ok: boolean; wallet: StoredWallet; txHash?: string; error?: string }> = [];
+      const results: Array<{ ok: boolean; wallet: StoredWallet; txHash?: string; executionMs?: number; error?: string }> = [];
       const workers = Array.from({ length: workerCount }, async (_, index) => {
         const workerId = index + 1;
         while (nextWalletIndex < activeWallets.length) {
@@ -393,7 +395,7 @@ export const Dashboard = () => {
           nextWalletIndex += 1;
           try {
             const result = await prepareAndBlast(wallet, workerId);
-            if (result.wallet) results.push({ ok: true, wallet: result.wallet, txHash: result.txHash });
+            if (result.wallet) results.push({ ok: true, wallet: result.wallet, txHash: result.txHash, executionMs: result.executionMs });
           } catch (err: any) {
             const message = err.message || 'Mint worker failed';
             results.push({ ok: false, wallet, error: message });
@@ -407,7 +409,9 @@ export const Dashboard = () => {
       const successful = results.filter(result => result.ok).length;
       const failed = results.length - successful;
       if (successful > 0) {
-        addLog('SUCCESS', `Parallel mint complete: ${successful}/${activeWallets.length} wallet(s) broadcasted.`, 'text-synapse-emerald');
+        const completed = results.filter(result => result.ok && result.executionMs !== undefined);
+        const averageMs = completed.length ? Math.round(completed.reduce((sum, result) => sum + (result.executionMs || 0), 0) / completed.length) : undefined;
+        addLog('SUCCESS', `Parallel mint complete: ${successful}/${activeWallets.length} wallet(s) accepted${averageMs !== undefined ? `; average execution ${averageMs} ms` : ''}.`, 'text-synapse-emerald');
       }
       if (failed > 0) {
         addLog('WARNING', `Parallel mint finished with ${failed} wallet error(s). Check the worker logs above.`, 'text-yellow-500');
