@@ -3727,6 +3727,9 @@ app.put(
       throw new ApiError(400, "isAdmin must be a boolean");
     }
     const isAdmin = body.isAdmin === true;
+    if (isAdmin && body.enabled === false) {
+      throw new ApiError(400, "Administrator access requires the grant to be enabled");
+    }
     const capabilities = normalizeCapabilities(body.capabilities);
     const now = new Date().toISOString();
     database()

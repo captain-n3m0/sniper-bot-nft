@@ -91,6 +91,7 @@ export const Admin = () => {
 
   const saveGrant = async (grantAddress: string, enabled: boolean, isAdmin: boolean, maxWallets: number, capabilities: CapabilityMap) => {
     if (!/^0x[0-9a-fA-F]{40}$/.test(grantAddress)) { setError('Enter a valid EVM wallet address'); return; }
+    if (isAdmin && !enabled) { setError('Administrator access requires Access enabled'); return; }
     if (!Number.isSafeInteger(maxWallets) || maxWallets < 0 || maxWallets > 100) { setError('Wallet limit must be an integer between 0 and 100'); return; }
     setSaving(true); setError(''); setNotice('');
     try {
@@ -120,7 +121,11 @@ export const Admin = () => {
   const formEnabled = selected?.enabled ?? newEnabled;
   const setFormEnabled = (enabled: boolean) => selected ? setSelected({ ...selected, enabled }) : setNewEnabled(enabled);
   const formIsAdmin = selected?.isAdmin ?? newIsAdmin;
-  const setFormIsAdmin = (isAdmin: boolean) => selected ? setSelected({ ...selected, isAdmin }) : setNewIsAdmin(isAdmin);
+  const setFormIsAdmin = (isAdmin: boolean) => {
+    if (isAdmin) setFormEnabled(true);
+    if (selected) setSelected({ ...selected, isAdmin });
+    else setNewIsAdmin(isAdmin);
+  };
   const formMaxWallets = selected?.maxWallets ?? newMaxWallets;
   const setFormMaxWallets = (maxWallets: number) => selected ? setSelected({ ...selected, maxWallets }) : setNewMaxWallets(maxWallets);
   const formTitle = useMemo(() => selected ? `Edit ${shortAddress(selected.address)}` : 'Whitelist wallet', [selected]);
