@@ -22,6 +22,8 @@ interface WalletManagerProps {
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
   authToken: string;
+  canDisperseFunds: boolean;
+  walletLimit: number;
 }
 
 interface FundingQuote {
@@ -70,7 +72,7 @@ function isEncryptedKeystore(value: unknown) {
   return Number(record.version) === 3 && Boolean(record.crypto || record.Crypto);
 }
 
-export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, authToken }: WalletManagerProps) => {
+export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, authToken, canDisperseFunds, walletLimit }: WalletManagerProps) => {
   const [name, setName] = useState('');
   const [privateKey, setPrivateKey] = useState('');
   const [error, setError] = useState('');
@@ -173,6 +175,10 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, auth
 
     try {
       const wallet = new Wallet(normalizedPrivateKey(privateKey));
+      if (wallets.length >= walletLimit) {
+        setError(`Your account is limited to ${walletLimit} execution wallet${walletLimit === 1 ? '' : 's'}`);
+        return;
+      }
       if (wallets.some((item) => item.address.toLowerCase() === wallet.address.toLowerCase())) {
         setError('This execution wallet is already imported');
         return;
@@ -263,6 +269,9 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, auth
         });
       }
       if (!imported.length) throw new Error('No new wallets were found; every address is already imported');
+      if (wallets.length + imported.length > walletLimit) {
+        throw new Error(`This import would exceed your ${walletLimit}-wallet account limit`);
+      }
 
       setWallets((current) => [...current, ...imported]);
       setJsonFile(null);
@@ -399,7 +408,7 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, auth
         <button
           type="button"
           onClick={() => void handleJsonImport()}
-          disabled={!jsonFile || isImportingJson}
+          disabled={!jsonFile || isImportingJson || wallets.length >= walletLimit}
           className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-synapse-cyan/10 px-4 py-3 font-mono text-sm font-semibold text-synapse-cyan transition-colors hover:bg-synapse-cyan/20 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {isImportingJson ? <Loader2 size={16} className="animate-spin" /> : <FileJson size={16} />}
@@ -438,12 +447,15 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, auth
         </div>
         <button 
           type="submit"
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-white/5 px-4 py-3 font-mono text-sm font-semibold text-white transition-colors hover:bg-white/10"
+          disabled={wallets.length >= walletLimit}
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-white/5 px-4 py-3 font-mono text-sm font-semibold text-white transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          <Plus size={16} /> Import Wallet
+          <Plus size={16} /> {wallets.length >= walletLimit ? 'Wallet limit reached' : 'Import Wallet'}
         </button>
+        <p className="text-xs text-neutral-500">Execution wallets: {wallets.length} / {walletLimit} allowed</p>
       </form>
 
+      {canDisperseFunds ? (
       <div className="mb-8 rounded-2xl border border-synapse-emerald/20 bg-synapse-emerald/[0.04] p-5">
         <div className="mb-5 flex items-center justify-between border-b border-white/5 pb-4">
           <div className="flex items-center gap-2">
@@ -589,6 +601,15 @@ export const WalletManager = ({ wallets, setWallets, addLog, selectedChain, auth
           </div>
         )}
       </div>
+      ) : (
+        <div className="mb-8 rounded-2xl border border-white/10 bg-black/20 p-5">
+          <div className="mb-2 flex items-center gap-2">
+            <Shield size={17} className="text-neutral-500" />
+            <span className="font-mono text-xs font-semibold uppercase tracking-widest text-neutral-400">Fund Disperser disabled</span>
+          </div>
+          <p className="text-xs leading-relaxed text-neutral-500">An administrator has not enabled Fund Disperser access for this wallet. You can still manage execution wallets.</p>
+        </div>
+      )}
 
       <div>
         <h3 className="mb-4 font-mono text-xs uppercase tracking-widest text-neutral-500">Stored Execution Wallets ({wallets.length})</h3>

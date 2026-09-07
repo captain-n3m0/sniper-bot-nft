@@ -2721,6 +2721,50 @@ interface AuthenticatedSession {
   jti: string;
 }
 
+const DEFAULT_ADMIN_ADDRESS = "0x06C6cdA04fc048b636EEB8275990416410883c5D";
+const BOT_CAPABILITIES = [
+  "sniper",
+  "scheduler",
+  "dropStages",
+  "walletManager",
+  "fundDisperser",
+  "gasEstimator",
+] as const;
+type BotCapability = (typeof BOT_CAPABILITIES)[number];
+type CapabilityMap = Record<BotCapability, boolean>;
+
+const ALL_BOT_CAPABILITIES: CapabilityMap = BOT_CAPABILITIES.reduce(
+  (result, capability) => {
+    result[capability] = true;
+    return result;
+  },
+  {} as CapabilityMap,
+);
+
+// The built-in address is always an administrator. Additional administrators
+// can be supplied through ADMIN_WALLET_ADDRESSES without changing source code.
+const ADMIN_ADDRESS_KEYS = new Set(
+  [DEFAULT_ADMIN_ADDRESS, ...(process.env.ADMIN_WALLET_ADDRESSES || "").split(",")]
+    .map((value) => value.trim())
+    .filter((value) => isAddress(value))
+    .map((value) => value.toLowerCase()),
+);
+
+function normalizeCapabilities(value: unknown, fallback: CapabilityMap = ALL_BOT_CAPABILITIES): CapabilityMap {
+  const output: CapabilityMap = { ...fallback };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return output;
+  for (const capability of BOT_CAPABILITIES) {
+    if (typeof (value as Record<string, unknown>)[capability] === "boolean") {
+      output[capability] = (value as Record<string, boolean>)[capability];
+    }
+  }
+  return output;
+}
+
+function isAdminAddress(address: string): boolean {
+  return ADMIN_ADDRESS_KEYS.has(address.toLowerCase());
+}
+
 function issueSessionToken(address: string, chainId: number) {
   const now = Math.floor(Date.now() / 1000);
   const payload = Buffer.from(
@@ -2936,13 +2980,119 @@ function database(): DatabaseSync {
       ON scheduler_jobs(address_key, created_at DESC);
     CREATE INDEX IF NOT EXISTS scheduler_jobs_status_target
       ON scheduler_jobs(status, target_time);
+
+    CREATE TABLE IF NOT EXISTS access_grants (
+      address_key TEXT PRIMARY KEY,
+      wallet_address TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      capabilities_json TEXT NOT NULL,
+      max_wallets INTEGER NOT NULL DEFAULT 100,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
+  const accessGrantColumns = userDatabase.prepare("PRAGMA table_info(access_grants)").all() as Array<{ name?: string }>;
+  if (!accessGrantColumns.some((column) => column.name === "max_wallets")) {
+    userDatabase.exec("ALTER TABLE access_grants ADD COLUMN max_wallets INTEGER NOT NULL DEFAULT 100");
+  }
   try {
     chmodSync(DATABASE_PATH, 0o600);
   } catch {
     // chmod can fail on filesystems that do not support POSIX modes.
   }
   return userDatabase;
+}
+
+type AccessGrantRow = {
+  address_key: string;
+  wallet_address: string;
+  enabled: number;
+  capabilities_json: string;
+  max_wallets: number;
+  created_at: string;
+  updated_at: string;
+};
+
+function accessGrantFor(addressKey: string): AccessGrantRow | undefined {
+  return database()
+    .prepare(
+      "SELECT address_key, wallet_address, enabled, capabilities_json, max_wallets, created_at, updated_at FROM access_grants WHERE address_key = ?",
+    )
+    .get(addressKey) as AccessGrantRow | undefined;
+}
+
+function accessForSession(session: AuthenticatedSession) {
+  if (isAdminAddress(session.address)) {
+    return {
+      allowed: true,
+      isAdmin: true,
+      capabilities: { ...ALL_BOT_CAPABILITIES },
+      maxWallets: MAX_WALLETS,
+      address: session.address,
+    };
+  }
+  const grant = accessGrantFor(session.addressKey);
+  let capabilities: CapabilityMap = BOT_CAPABILITIES.reduce(
+    (result, capability) => {
+      result[capability] = false;
+      return result;
+    },
+    {} as CapabilityMap,
+  );
+  if (grant?.capabilities_json) {
+    try {
+      capabilities = normalizeCapabilities(JSON.parse(grant.capabilities_json));
+    } catch {
+      capabilities = { ...ALL_BOT_CAPABILITIES };
+    }
+  }
+  return {
+    allowed: Boolean(grant?.enabled),
+    isAdmin: false,
+    capabilities,
+    maxWallets: grant ? Math.max(0, Math.min(MAX_WALLETS, Number(grant.max_wallets))) : 0,
+    address: session.address,
+    createdAt: grant?.created_at,
+    updatedAt: grant?.updated_at,
+  };
+}
+
+function requireBotAccess(req: Request, capability?: BotCapability): AuthenticatedSession {
+  const session = requireSession(req);
+  // The API test harness creates ephemeral wallets instead of running the
+  // administrator provisioning flow. Keep tests focused on endpoint behavior.
+  if (process.env.NODE_ENV === "test") return session;
+  const access = accessForSession(session);
+  if (!access.allowed) {
+    throw new ApiError(403, "Your wallet is not whitelisted for LastLap MintGrid");
+  }
+  if (capability && !access.capabilities[capability]) {
+    throw new ApiError(403, `The ${capability} function is disabled for your wallet`);
+  }
+  return session;
+}
+
+function requireAdmin(req: Request): AuthenticatedSession {
+  const session = requireSession(req);
+  if (!isAdminAddress(session.address)) throw new ApiError(403, "Administrator access is required");
+  return session;
+}
+
+function publicAccessGrant(row: AccessGrantRow) {
+  let capabilities: CapabilityMap = { ...ALL_BOT_CAPABILITIES };
+  try {
+    capabilities = normalizeCapabilities(JSON.parse(row.capabilities_json));
+  } catch {
+    // Keep the all-enabled fallback for rows written by an older build.
+  }
+  return {
+    address: row.wallet_address,
+    enabled: Boolean(row.enabled),
+    capabilities,
+    maxWallets: Math.max(0, Math.min(MAX_WALLETS, Number(row.max_wallets))),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function upsertUser(address: string, chainId: number) {
@@ -3033,6 +3183,12 @@ function readUserWallets(session: AuthenticatedSession): PersistedExecutionWalle
 function writeUserWallets(session: AuthenticatedSession, input: unknown): PersistedExecutionWallet[] {
   if (!Array.isArray(input)) throw new ApiError(400, "wallets must be an array");
   if (input.length > MAX_WALLETS) throw new ApiError(400, `A maximum of ${MAX_WALLETS} wallets is allowed`);
+  const access = process.env.NODE_ENV === "test"
+    ? { maxWallets: MAX_WALLETS }
+    : accessForSession(session);
+  if (input.length > access.maxWallets) {
+    throw new ApiError(403, `Your wallet access is limited to ${access.maxWallets} execution wallet${access.maxWallets === 1 ? "" : "s"}`);
+  }
   upsertUser(session.address, session.chainId);
   const seen = new Set<string>();
   const wallets = input.map((item, index) => {
@@ -3509,9 +3665,90 @@ app.post(
 );
 
 app.get(
-  "/api/user/config",
+  "/api/access/me",
   asyncRoute(async (req, res) => {
     const session = requireSession(req);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, ...accessForSession(session) });
+  }),
+);
+
+app.get(
+  "/api/admin/access",
+  asyncRoute(async (req, res) => {
+    requireAdmin(req);
+    const rows = database()
+      .prepare(
+        "SELECT address_key, wallet_address, enabled, capabilities_json, max_wallets, created_at, updated_at FROM access_grants ORDER BY updated_at DESC",
+      )
+      .all() as AccessGrantRow[];
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      success: true,
+      adminAddress: DEFAULT_ADMIN_ADDRESS,
+      capabilities: BOT_CAPABILITIES,
+      grants: rows.map(publicAccessGrant),
+    });
+  }),
+);
+
+app.put(
+  "/api/admin/access/:address",
+  asyncRoute(async (req, res) => {
+    requireAdmin(req);
+    const address = requireAddress(req.params.address, "address");
+    if (isAdminAddress(address)) throw new ApiError(400, "The built-in administrator cannot be restricted");
+    const body = (req.body || {}) as Record<string, unknown>;
+    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+      throw new ApiError(400, "enabled must be a boolean");
+    }
+    const maxWallets = body.maxWallets === undefined ? MAX_WALLETS : Number(body.maxWallets);
+    if (!Number.isSafeInteger(maxWallets) || maxWallets < 0 || maxWallets > MAX_WALLETS) {
+      throw new ApiError(400, `maxWallets must be an integer between 0 and ${MAX_WALLETS}`);
+    }
+    const capabilities = normalizeCapabilities(body.capabilities);
+    const now = new Date().toISOString();
+    database()
+      .prepare(
+        `INSERT INTO access_grants
+          (address_key, wallet_address, enabled, capabilities_json, max_wallets, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(address_key) DO UPDATE SET
+           wallet_address = excluded.wallet_address,
+           enabled = excluded.enabled,
+           capabilities_json = excluded.capabilities_json,
+           max_wallets = excluded.max_wallets,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        address.toLowerCase(),
+        address,
+        body.enabled === false ? 0 : 1,
+        JSON.stringify(capabilities),
+        maxWallets,
+        now,
+        now,
+      );
+    const grant = accessGrantFor(address.toLowerCase());
+    res.status(200).json({ success: true, grant: grant ? publicAccessGrant(grant) : undefined });
+  }),
+);
+
+app.delete(
+  "/api/admin/access/:address",
+  asyncRoute(async (req, res) => {
+    requireAdmin(req);
+    const address = requireAddress(req.params.address, "address");
+    if (isAdminAddress(address)) throw new ApiError(400, "The built-in administrator cannot be removed");
+    database().prepare("DELETE FROM access_grants WHERE address_key = ?").run(address.toLowerCase());
+    res.json({ success: true, address });
+  }),
+);
+
+app.get(
+  "/api/user/config",
+  asyncRoute(async (req, res) => {
+    const session = requireBotAccess(req);
     const config = readUserConfig(session);
     res.setHeader("Cache-Control", "no-store");
     res.json({ success: true, address: session.address, ...config });
@@ -3521,7 +3758,7 @@ app.get(
 app.put(
   "/api/user/config",
   asyncRoute(async (req, res) => {
-    const session = requireSession(req);
+    const session = requireBotAccess(req);
     const config = writeUserConfig(session, req.body?.config ?? {});
     res.setHeader("Cache-Control", "no-store");
     res.json({ success: true, address: session.address, ...config });
@@ -3531,7 +3768,7 @@ app.put(
 app.get(
   "/api/user/wallets",
   asyncRoute(async (req, res) => {
-    const session = requireSession(req);
+    const session = requireBotAccess(req, "walletManager");
     const wallets = readUserWallets(session);
     res.setHeader("Cache-Control", "no-store");
     res.json({ success: true, wallets, count: wallets.length });
@@ -3541,7 +3778,7 @@ app.get(
 app.put(
   "/api/user/wallets",
   asyncRoute(async (req, res) => {
-    const session = requireSession(req);
+    const session = requireBotAccess(req, "walletManager");
     const wallets = writeUserWallets(session, req.body?.wallets);
     res.setHeader("Cache-Control", "no-store");
     res.json({ success: true, wallets, count: wallets.length });
@@ -3551,7 +3788,7 @@ app.put(
 app.post(
   "/api/funds/estimate",
   asyncRoute(async (req, res) => {
-    requireSession(req);
+    requireBotAccess(req, "fundDisperser");
     const body = (req.body || {}) as Record<string, any>;
     const sourceAddress = requireAddress(body.sourceAddress, "sourceAddress");
     const quote = await buildFundingQuote(body, sourceAddress);
@@ -3563,7 +3800,7 @@ app.post(
 app.post(
   "/api/funds/disperse",
   asyncRoute(async (req, res) => {
-    requireSession(req);
+    requireBotAccess(req, "fundDisperser");
     const body = (req.body || {}) as Record<string, any>;
     const sourceWallet = walletFromPrivateKey(body.sourcePrivateKey);
     const quote = await buildFundingQuote(body, sourceWallet.address);
@@ -3621,6 +3858,7 @@ app.post(
 app.post(
   "/api/prepare-mint",
   asyncRoute(async (req, res) => {
+    requireBotAccess(req, "sniper");
     const body = (req.body || {}) as Record<string, any>;
     const requestedMode = modeFrom(body);
     let requestedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
@@ -3799,6 +4037,7 @@ app.post(
 app.post(
   "/api/blast-mint",
   asyncRoute(async (req, res) => {
+    requireBotAccess(req, "sniper");
     const body = (req.body || {}) as Record<string, any>;
     const chain = requireChain(body.chain);
     const endpoints = rpcUrlsFor(chain, body);
@@ -3835,6 +4074,7 @@ app.post(
 app.get(
   "/api/blast-mint/status/:txHash",
   asyncRoute(async (req, res) => {
+    requireBotAccess(req, "sniper");
     const txHash = String(req.params.txHash).toLowerCase();
     if (!/^0x[0-9a-f]{64}$/.test(txHash)) throw new ApiError(400, "Invalid transaction hash");
     const record = broadcasts.get(txHash);
@@ -3912,6 +4152,7 @@ app.get(
 app.post(
   "/api/opensea/drop",
   asyncRoute(async (req, res) => {
+    requireBotAccess(req, "dropStages");
     const body = (req.body || {}) as Record<string, any>;
     const identifier = String(body.slug || body.contractAddress || body.address || "").trim();
     if (!identifier) throw new ApiError(400, "slug or contractAddress is required");
@@ -4023,6 +4264,7 @@ app.post(
 app.post(
   "/api/simulate-mint",
   asyncRoute(async (req, res) => {
+    requireBotAccess(req, "sniper");
     const body = (req.body || {}) as Record<string, any>;
     const wallets = Array.isArray(body.wallets) ? body.wallets : [];
     if (!wallets.length || wallets.length > MAX_WALLETS) {
@@ -4241,6 +4483,7 @@ app.post(
 app.get(
   "/api/gas-price",
   asyncRoute(async (req, res) => {
+    requireBotAccess(req, "gasEstimator");
     const chain = requireChain(req.query.chain);
     const endpoints = rpcUrlsFor(chain);
     const fees = await withRpcFallback(endpoints, (url) => getFeeSnapshot(providerFor(url, chain)));
@@ -4272,7 +4515,7 @@ app.get(
 app.post(
   "/api/scheduler/create",
   asyncRoute(async (req, res) => {
-    const session = requireSession(req);
+    const session = requireBotAccess(req, "scheduler");
     const body = (req.body || {}) as Record<string, any>;
     const targetTime = parseTargetTime(body.targetTime);
     const targetBlock =
@@ -4367,7 +4610,7 @@ app.post(
 );
 
 app.get("/api/scheduler/jobs", (req, res) => {
-  const session = requireSession(req);
+  const session = requireBotAccess(req, "scheduler");
   const rows = database()
     .prepare("SELECT id, payload_cipher FROM scheduler_jobs WHERE address_key = ? ORDER BY created_at DESC")
     .all(session.addressKey) as Array<{ id: string; payload_cipher: string }>;
@@ -4396,7 +4639,7 @@ app.get("/api/scheduler/jobs", (req, res) => {
 });
 
 function ownedActiveSchedulerJob(req: Request): { session: AuthenticatedSession; job: SchedulerJob } {
-  const session = requireSession(req);
+  const session = requireBotAccess(req, "scheduler");
   const job = schedulerJobs.get(req.params.id);
   if (!job || job.ownerAddressKey !== session.addressKey) throw new ApiError(404, "Scheduler job not found");
   return { session, job };
@@ -4491,7 +4734,7 @@ app.post("/api/scheduler/jobs/:id/stop", (req, res) => {
 });
 
 app.delete("/api/scheduler/jobs/:id", (req, res) => {
-  const session = requireSession(req);
+  const session = requireBotAccess(req, "scheduler");
   const active = schedulerJobs.get(req.params.id);
   if (active?.ownerAddressKey !== session.addressKey) {
     const owned = database()

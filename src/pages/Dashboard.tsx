@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
-import { Terminal, Shield, Zap, Play, CheckCircle2, XCircle, ArrowLeft, ShieldCheck } from 'lucide-react';
+import { Terminal, Shield, Zap, Play, CheckCircle2, XCircle, ArrowLeft, ShieldCheck, LockKeyhole } from 'lucide-react';
 import { ShinyButton } from '../components/ShinyButton';
 import { WalletManager, StoredWallet } from '../components/WalletManager';
 import { ChainSelector } from '../components/ChainSelector';
@@ -18,6 +18,15 @@ const CONFIG_SAVE_DELAY_MS = 700;
 const WALLET_SAVE_DELAY_MS = 500;
 
 type DashboardTab = 'sniper' | 'wallets' | 'stages' | 'scheduler' | 'gas';
+type DashboardCapability = 'sniper' | 'scheduler' | 'dropStages' | 'walletManager' | 'fundDisperser' | 'gasEstimator';
+
+interface AccessState {
+  allowed: boolean;
+  isAdmin: boolean;
+  capabilities: Partial<Record<DashboardCapability, boolean>>;
+  maxWallets: number;
+  address: string;
+}
 
 interface SniperFormState {
   contractAddress: string;
@@ -81,6 +90,7 @@ export const Dashboard = () => {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem('auth_token') || '');
   const [authAddress, setAuthAddress] = useState(() => localStorage.getItem('auth_address') || '');
   const [isAuthenticated, setIsAuthenticated] = useState(() => Boolean(localStorage.getItem('auth_token') && localStorage.getItem('auth_address')));
+  const [access, setAccess] = useState<AccessState | null>(null);
 
   const [activeTab, setActiveTab] = useState<DashboardTab>('sniper');
   const [wallets, setWallets] = useState<StoredWallet[]>([]);
@@ -121,18 +131,38 @@ export const Dashboard = () => {
     setWalletsLoaded(false);
     setWallets([]);
     setIsAuthenticated(false);
+    setAccess(null);
   };
+
+  const hasCapability = (capability: DashboardCapability) =>
+    Boolean(access?.allowed && (access.isAdmin || access.capabilities[capability] !== false));
 
   useEffect(() => {
     if (!isAuthenticated || !authToken) {
       setConfigLoaded(false);
       setWalletsLoaded(false);
+      setAccess(null);
       return;
     }
 
     let cancelled = false;
     const loadConfig = async () => {
       try {
+        const accessResponse = await fetch('/api/access/me', {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        const accessData = await readJsonResponse(accessResponse);
+        if (accessResponse.status === 401) clearAuth();
+        if (!accessResponse.ok || !accessData.success) {
+          throw new Error(accessData.error || 'Could not load access permissions');
+        }
+        if (cancelled) return;
+        setAccess(accessData as AccessState);
+        if (!accessData.allowed) {
+          setConfigLoaded(true);
+          setWalletsLoaded(true);
+          return;
+        }
         const response = await fetch('/api/user/config', {
           headers: { Authorization: `Bearer ${authToken}` }
         });
@@ -143,12 +173,16 @@ export const Dashboard = () => {
         }
         if (cancelled) return;
 
-        const walletsResponse = await fetch('/api/user/wallets', {
-          headers: { Authorization: `Bearer ${authToken}` }
-        });
-        const walletsData = await walletsResponse.json();
-        if (!walletsResponse.ok || !walletsData.success || !Array.isArray(walletsData.wallets)) {
-          throw new Error(walletsData.error || 'Could not load saved execution wallets');
+        const walletsData: { wallets: StoredWallet[] } = { wallets: [] };
+        if (accessData.isAdmin || accessData.capabilities?.walletManager !== false) {
+          const walletsResponse = await fetch('/api/user/wallets', {
+            headers: { Authorization: `Bearer ${authToken}` }
+          });
+          const loadedWallets = await walletsResponse.json();
+          if (!walletsResponse.ok || !loadedWallets.success || !Array.isArray(loadedWallets.wallets)) {
+            throw new Error(loadedWallets.error || 'Could not load saved execution wallets');
+          }
+          walletsData.wallets = loadedWallets.wallets;
         }
         if (cancelled) return;
 
@@ -231,6 +265,21 @@ export const Dashboard = () => {
       if (configSaveTimer.current) clearTimeout(configSaveTimer.current);
     };
   }, [isAuthenticated, authToken, configLoaded, selectedChain, form, activeTab]);
+
+  useEffect(() => {
+    if (!access?.allowed) return;
+    const permitted: Array<[DashboardTab, DashboardCapability]> = [
+      ['sniper', 'sniper'],
+      ['wallets', 'walletManager'],
+      ['stages', 'dropStages'],
+      ['scheduler', 'scheduler'],
+      ['gas', 'gasEstimator'],
+    ];
+    const current = permitted.find(([tab]) => tab === activeTab);
+    if (current && hasCapability(current[1])) return;
+    const first = permitted.find(([, capability]) => hasCapability(capability));
+    if (first) setActiveTab(first[0]);
+  }, [access, activeTab]);
 
   useEffect(() => {
     if (!isAuthenticated || !authToken || !walletsLoaded) return;
@@ -437,7 +486,17 @@ export const Dashboard = () => {
           addLog('SYSTEM', `Authenticated as ${address}. This wallet is login-only and is not an execution wallet. Saved config sync is enabled.`, 'text-synapse-emerald');
         }} />
       )}
-      <main className={`min-h-screen bg-[#030303] text-white selection:bg-synapse-violet/30 pb-24 ${!isAuthenticated ? 'opacity-0 pointer-events-none' : 'opacity-100 transition-opacity duration-1000'}`}>
+      {isAuthenticated && access && !access.allowed && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#030303] px-6 text-center">
+          <div className="max-w-md rounded-[24px] border border-yellow-500/20 bg-yellow-500/5 p-8">
+            <LockKeyhole className="mx-auto mb-4 text-yellow-400" size={32} />
+            <h1 className="font-serif text-3xl text-white">Access pending</h1>
+            <p className="mt-3 text-sm leading-6 text-neutral-400">This wallet has not been whitelisted for LastLap MintGrid. Ask the administrator to grant access, then sign in again.</p>
+            <button type="button" onClick={clearAuth} className="mt-6 rounded-xl border border-white/15 px-5 py-3 font-mono text-xs uppercase tracking-widest text-white hover:border-synapse-cyan/60">Sign out</button>
+          </div>
+        </div>
+      )}
+      <main className={`min-h-screen bg-[#030303] text-white selection:bg-synapse-violet/30 pb-24 ${!isAuthenticated || !access?.allowed ? 'opacity-0 pointer-events-none' : 'opacity-100 transition-opacity duration-1000'}`}>
         {/* Navbar */}
       <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between border-b border-white/5 bg-[#030303]/80 px-6 py-4 backdrop-blur-md">
         <div className="flex items-center gap-6">
@@ -470,36 +529,36 @@ export const Dashboard = () => {
           <div className="lg:col-span-5 flex flex-col gap-6">
             {/* Tabs */}
             <div className="flex space-x-2 border-b border-white/5 pb-2">
-              <button
+              {hasCapability('sniper') && <button
                 onClick={() => setActiveTab('sniper')}
                 className={`px-4 py-2 text-xs font-mono uppercase tracking-widest transition-colors ${activeTab === 'sniper' ? 'border-b-2 border-synapse-violet text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
               >
                 Sniper
-              </button>
-              <button
+              </button>}
+              {hasCapability('walletManager') && <button
                 onClick={() => setActiveTab('wallets')}
                 className={`px-4 py-2 text-xs font-mono uppercase tracking-widest transition-colors ${activeTab === 'wallets' ? 'border-b-2 border-synapse-cyan text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
               >
                 Wallet Manager
-              </button>
-              <button
+              </button>}
+              {hasCapability('dropStages') && <button
                 onClick={() => setActiveTab('stages')}
                 className={`px-4 py-2 text-xs font-mono uppercase tracking-widest transition-colors ${activeTab === 'stages' ? 'border-b-2 border-synapse-cyan text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
               >
                 Drop Stages
-              </button>
-              <button
+              </button>}
+              {hasCapability('scheduler') && <button
                 onClick={() => setActiveTab('scheduler')}
                 className={`px-4 py-2 text-xs font-mono uppercase tracking-widest transition-colors ${activeTab === 'scheduler' ? 'border-b-2 border-synapse-violet text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
               >
                 Schedule Mint
-              </button>
-              <button
+              </button>}
+              {hasCapability('gasEstimator') && <button
                 onClick={() => setActiveTab('gas')}
                 className={`px-4 py-2 text-xs font-mono uppercase tracking-widest transition-colors ${activeTab === 'gas' ? 'border-b-2 border-synapse-cyan text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
               >
                 Gas Estimator
-              </button>
+              </button>}
             </div>
 
             {activeTab === 'sniper' && (
@@ -660,6 +719,8 @@ export const Dashboard = () => {
                 addLog={addLog}
                 selectedChain={selectedChain}
                 authToken={authToken}
+                canDisperseFunds={hasCapability('fundDisperser')}
+                walletLimit={access?.maxWallets ?? 0}
               />
             )}
 

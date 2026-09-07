@@ -8,6 +8,7 @@ export const Navigation = () => {
     { label: 'Docs', to: '/docs' },
     { label: 'Features', to: '/#features' },
     { label: 'Status', to: '/status' },
+    { label: 'Admin', to: '/admin' },
   ];
 
   return (
