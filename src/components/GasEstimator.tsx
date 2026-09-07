@@ -5,9 +5,10 @@ import { defaultGasStrategy, GasEstimatorInputs, GasEstimatorOutputs, GasCalcula
 interface GasEstimatorProps {
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
+  authToken?: string;
 }
 
-export const GasEstimator = ({ addLog, selectedChain }: GasEstimatorProps) => {
+export const GasEstimator = ({ addLog, selectedChain, authToken }: GasEstimatorProps) => {
   const [inputs, setInputs] = useState<GasEstimatorInputs>({
     floorPriceEth: 0.1,
     pendingBids: 100,
@@ -27,7 +28,10 @@ export const GasEstimator = ({ addLog, selectedChain }: GasEstimatorProps) => {
     const fetchFee = async () => {
       setIsFetchingFee(true);
       try {
-        const res = await fetch(`/api/gas-price?chain=${selectedChain}`);
+        const headers: HeadersInit = {};
+        const token = authToken || localStorage.getItem('auth_token');
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(`/api/gas-price?chain=${selectedChain}`, { headers });
         if (!res.ok) throw new Error("Failed");
         const data = await res.json();
         if (isMounted && data.baseFeeGwei) {
@@ -45,7 +49,7 @@ export const GasEstimator = ({ addLog, selectedChain }: GasEstimatorProps) => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [selectedChain]);
+  }, [selectedChain, authToken]);
 
 
   useEffect(() => {

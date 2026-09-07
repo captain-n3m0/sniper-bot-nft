@@ -449,6 +449,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
 
           <LiveTransactionFee
             selectedChain={selectedChain}
+            authToken={authToken}
             gasLimit="350000"
             valueWei={null}
             exactGasLimit={false}

@@ -5,6 +5,7 @@ import { resolveChain } from '../lib/chains';
 
 interface LiveTransactionFeeProps {
   selectedChain: string;
+  authToken?: string;
   gasLimit: string;
   valueWei: string | null;
   exactGasLimit: boolean;
@@ -33,6 +34,7 @@ const nativeAmount = (wei: bigint, decimals = 6) => {
 
 export const LiveTransactionFee = ({
   selectedChain,
+  authToken,
   gasLimit,
   valueWei,
   exactGasLimit,
@@ -49,7 +51,10 @@ export const LiveTransactionFee = ({
     const refresh = async () => {
       setRefreshing(true);
       try {
-        const response = await fetch(`/api/gas-price?chain=${encodeURIComponent(selectedChain)}`);
+        const headers: HeadersInit = {};
+        const token = authToken || localStorage.getItem('auth_token');
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const response = await fetch(`/api/gas-price?chain=${encodeURIComponent(selectedChain)}`, { headers });
         const data = await response.json();
         if (!response.ok || !data.tiers?.fast) throw new Error(data.error || 'Gas feed unavailable');
         if (active) {
@@ -68,7 +73,7 @@ export const LiveTransactionFee = ({
       active = false;
       clearInterval(timer);
     };
-  }, [selectedChain]);
+  }, [selectedChain, authToken]);
 
   const estimate = useMemo(() => {
     if (!fees) return null;

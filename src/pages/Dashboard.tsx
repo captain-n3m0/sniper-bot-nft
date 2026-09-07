@@ -679,6 +679,7 @@ export const Dashboard = () => {
 
                 <LiveTransactionFee
                   selectedChain={selectedChain}
+                  authToken={authToken}
                   gasLimit={mintFeeBasis.gasLimit}
                   valueWei={mintFeeBasis.valueWei}
                   exactGasLimit={mintFeeBasis.exact}
@@ -780,7 +781,7 @@ export const Dashboard = () => {
             )}
 
             {activeTab === 'gas' && (
-              <GasEstimator addLog={addLog} selectedChain={selectedChain} />
+              <GasEstimator addLog={addLog} selectedChain={selectedChain} authToken={authToken} />
             )}
           </div>
 
