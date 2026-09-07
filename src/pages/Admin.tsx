@@ -5,7 +5,7 @@ import { WalletLogin } from '../components/WalletLogin';
 
 type Capability = 'sniper' | 'scheduler' | 'dropStages' | 'walletManager' | 'fundDisperser' | 'gasEstimator';
 type CapabilityMap = Record<Capability, boolean>;
-type Grant = { address: string; enabled: boolean; maxWallets: number; capabilities: CapabilityMap; createdAt: string; updatedAt: string };
+type Grant = { address: string; enabled: boolean; isAdmin: boolean; maxWallets: number; capabilities: CapabilityMap; createdAt: string; updatedAt: string };
 
 const capabilityLabels: Record<Capability, string> = {
   sniper: 'Sniper minting',
@@ -36,6 +36,7 @@ export const Admin = () => {
   const [newAddress, setNewAddress] = useState('');
   const [newCapabilities, setNewCapabilities] = useState<CapabilityMap>(allCapabilities());
   const [newEnabled, setNewEnabled] = useState(true);
+  const [newIsAdmin, setNewIsAdmin] = useState(false);
   const [newMaxWallets, setNewMaxWallets] = useState(100);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -88,15 +89,15 @@ export const Admin = () => {
     setError('');
   };
 
-  const saveGrant = async (grantAddress: string, enabled: boolean, maxWallets: number, capabilities: CapabilityMap) => {
+  const saveGrant = async (grantAddress: string, enabled: boolean, isAdmin: boolean, maxWallets: number, capabilities: CapabilityMap) => {
     if (!/^0x[0-9a-fA-F]{40}$/.test(grantAddress)) { setError('Enter a valid EVM wallet address'); return; }
     if (!Number.isSafeInteger(maxWallets) || maxWallets < 0 || maxWallets > 100) { setError('Wallet limit must be an integer between 0 and 100'); return; }
     setSaving(true); setError(''); setNotice('');
     try {
-      const body = await request(`/api/admin/access/${grantAddress}`, { method: 'PUT', body: JSON.stringify({ enabled, maxWallets, capabilities }) });
+      const body = await request(`/api/admin/access/${grantAddress}`, { method: 'PUT', body: JSON.stringify({ enabled, isAdmin, maxWallets, capabilities }) });
       const saved = body.grant as Grant;
       setGrants((current) => [saved, ...current.filter((item) => item.address.toLowerCase() !== saved.address.toLowerCase())]);
-      setSelected(null); setNewAddress(''); setNewCapabilities(allCapabilities()); setNewEnabled(true); setNewMaxWallets(100);
+      setSelected(null); setNewAddress(''); setNewCapabilities(allCapabilities()); setNewEnabled(true); setNewIsAdmin(false); setNewMaxWallets(100);
       setNotice(`Access updated for ${shortAddress(saved.address)}.`);
     } catch (err: any) { setError(err?.message || 'Could not save access grant'); }
     finally { setSaving(false); }
@@ -118,6 +119,8 @@ export const Admin = () => {
   const formAddress = selected?.address || newAddress;
   const formEnabled = selected?.enabled ?? newEnabled;
   const setFormEnabled = (enabled: boolean) => selected ? setSelected({ ...selected, enabled }) : setNewEnabled(enabled);
+  const formIsAdmin = selected?.isAdmin ?? newIsAdmin;
+  const setFormIsAdmin = (isAdmin: boolean) => selected ? setSelected({ ...selected, isAdmin }) : setNewIsAdmin(isAdmin);
   const formMaxWallets = selected?.maxWallets ?? newMaxWallets;
   const setFormMaxWallets = (maxWallets: number) => selected ? setSelected({ ...selected, maxWallets }) : setNewMaxWallets(maxWallets);
   const formTitle = useMemo(() => selected ? `Edit ${shortAddress(selected.address)}` : 'Whitelist wallet', [selected]);
@@ -140,6 +143,8 @@ export const Admin = () => {
             <label className="mb-2 block font-mono text-xs uppercase tracking-widest text-neutral-500">Wallet address</label>
             <input value={formAddress} disabled={Boolean(selected)} onChange={(e) => setNewAddress(e.target.value)} placeholder="0x…" className="mb-5 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 font-mono text-sm text-white outline-none focus:border-synapse-cyan/60 disabled:opacity-50" />
             <label className="mb-3 flex items-center justify-between font-mono text-xs uppercase tracking-widest text-neutral-500"><span>Access enabled</span><input type="checkbox" checked={formEnabled} onChange={(e) => setFormEnabled(e.target.checked)} className="h-4 w-4 accent-cyan-400" /></label>
+            <label className="mb-2 flex items-center justify-between font-mono text-xs uppercase tracking-widest text-synapse-violet"><span>Administrator access</span><input type="checkbox" checked={formIsAdmin} onChange={(e) => setFormIsAdmin(e.target.checked)} className="h-4 w-4 accent-violet-400" /></label>
+            <p className="mb-5 text-xs text-neutral-500">Administrators can manage whitelist grants and feature permissions.</p>
             <label className="mb-2 block font-mono text-xs uppercase tracking-widest text-neutral-500">Execution wallet limit</label>
             <input type="number" min="0" max="100" step="1" value={formMaxWallets} onChange={(e) => setFormMaxWallets(Number(e.target.value))} className="mb-1 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 font-mono text-sm text-white outline-none focus:border-synapse-cyan/60" />
             <p className="mb-5 text-xs text-neutral-500">Maximum imported execution wallets for this user (0–100).</p>
@@ -147,9 +152,9 @@ export const Admin = () => {
             <div className="space-y-2">
               {(Object.keys(capabilityLabels) as Capability[]).map((capability) => <label key={capability} className="flex items-center justify-between rounded-xl border border-white/5 bg-black/20 px-4 py-3 text-sm text-neutral-300"><span>{capabilityLabels[capability]}</span><input type="checkbox" checked={Boolean(formCapabilities[capability])} onChange={(e) => setFormCapabilities({ ...formCapabilities, [capability]: e.target.checked })} className="h-4 w-4 accent-cyan-400" /></label>)}
             </div>
-            <div className="mt-6 flex gap-3"><button disabled={saving} onClick={() => void saveGrant(formAddress, formEnabled, formMaxWallets, formCapabilities)} className="flex-1 rounded-xl bg-white px-5 py-3 font-mono text-xs font-bold uppercase tracking-widest text-black disabled:opacity-50">{saving ? 'Saving…' : selected ? 'Save changes' : 'Grant access'}</button>{selected && <button disabled={saving} onClick={() => setSelected(null)} className="rounded-xl border border-white/15 px-5 py-3 font-mono text-xs uppercase tracking-widest text-neutral-300">Cancel</button>}</div>
+            <div className="mt-6 flex gap-3"><button disabled={saving} onClick={() => void saveGrant(formAddress, formEnabled, formIsAdmin, formMaxWallets, formCapabilities)} className="flex-1 rounded-xl bg-white px-5 py-3 font-mono text-xs font-bold uppercase tracking-widest text-black disabled:opacity-50">{saving ? 'Saving…' : selected ? 'Save changes' : 'Grant access'}</button>{selected && <button disabled={saving} onClick={() => setSelected(null)} className="rounded-xl border border-white/15 px-5 py-3 font-mono text-xs uppercase tracking-widest text-neutral-300">Cancel</button>}</div>
           </section>
-          <section className="rounded-[24px] border border-white/10 bg-white/[0.02] p-7"><div className="mb-6 flex items-center gap-3 border-b border-white/10 pb-5"><LockKeyhole size={19} className="text-synapse-violet" /><h2 className="font-serif text-2xl">Whitelisted wallets</h2><span className="ml-auto rounded-full bg-white/5 px-3 py-1 font-mono text-xs text-neutral-400">{grants.length}</span></div>{grants.length === 0 ? <p className="py-10 text-center text-sm text-neutral-500">No wallets have been whitelisted yet.</p> : <div className="space-y-3">{grants.map((grant) => <div key={grant.address} className="rounded-xl border border-white/10 bg-black/20 p-4"><div className="flex items-center justify-between gap-4"><div><p className="font-mono text-sm text-white">{shortAddress(grant.address)}</p><p className={`mt-1 font-mono text-[10px] uppercase tracking-widest ${grant.enabled ? 'text-synapse-emerald' : 'text-red-400'}`}>{grant.enabled ? 'Enabled' : 'Disabled'} • {grant.maxWallets} wallet{grant.maxWallets === 1 ? '' : 's'}</p></div><div className="flex gap-2"><button onClick={() => setSelected(grant)} className="rounded-lg border border-white/15 px-3 py-2 font-mono text-[10px] uppercase tracking-widest text-neutral-300 hover:border-synapse-cyan/60">Edit</button><button onClick={() => void removeGrant(grant)} className="rounded-lg border border-red-500/20 p-2 text-red-400 hover:bg-red-500/10"><Trash2 size={14} /></button></div></div><div className="mt-3 flex flex-wrap gap-2">{(Object.keys(capabilityLabels) as Capability[]).filter((capability) => grant.capabilities[capability]).map((capability) => <span key={capability} className="rounded-full bg-synapse-cyan/10 px-2 py-1 font-mono text-[9px] uppercase tracking-wider text-synapse-cyan">{capabilityLabels[capability]}</span>)}</div></div>)}</div>}</section>
+          <section className="rounded-[24px] border border-white/10 bg-white/[0.02] p-7"><div className="mb-6 flex items-center gap-3 border-b border-white/10 pb-5"><LockKeyhole size={19} className="text-synapse-violet" /><h2 className="font-serif text-2xl">Whitelisted wallets</h2><span className="ml-auto rounded-full bg-white/5 px-3 py-1 font-mono text-xs text-neutral-400">{grants.length}</span></div>{grants.length === 0 ? <p className="py-10 text-center text-sm text-neutral-500">No wallets have been whitelisted yet.</p> : <div className="space-y-3">{grants.map((grant) => <div key={grant.address} className="rounded-xl border border-white/10 bg-black/20 p-4"><div className="flex items-center justify-between gap-4"><div><p className="font-mono text-sm text-white">{shortAddress(grant.address)}</p><p className={`mt-1 font-mono text-[10px] uppercase tracking-widest ${grant.enabled ? 'text-synapse-emerald' : 'text-red-400'}`}>{grant.enabled ? 'Enabled' : 'Disabled'} • {grant.isAdmin ? 'Administrator • ' : ''}{grant.maxWallets} wallet{grant.maxWallets === 1 ? '' : 's'}</p></div><div className="flex gap-2"><button onClick={() => setSelected(grant)} className="rounded-lg border border-white/15 px-3 py-2 font-mono text-[10px] uppercase tracking-widest text-neutral-300 hover:border-synapse-cyan/60">Edit</button><button onClick={() => void removeGrant(grant)} className="rounded-lg border border-red-500/20 p-2 text-red-400 hover:bg-red-500/10"><Trash2 size={14} /></button></div></div><div className="mt-3 flex flex-wrap gap-2">{(Object.keys(capabilityLabels) as Capability[]).filter((capability) => grant.capabilities[capability]).map((capability) => <span key={capability} className="rounded-full bg-synapse-cyan/10 px-2 py-1 font-mono text-[9px] uppercase tracking-wider text-synapse-cyan">{capabilityLabels[capability]}</span>)}</div></div>)}</div>}</section>
         </div>}
       </div>
     </main>

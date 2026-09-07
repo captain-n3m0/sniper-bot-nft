@@ -2762,6 +2762,17 @@ function normalizeCapabilities(value: unknown, fallback: CapabilityMap = ALL_BOT
 }
 
 function isAdminAddress(address: string): boolean {
+  const addressKey = address.toLowerCase();
+  if (ADMIN_ADDRESS_KEYS.has(addressKey)) return true;
+  try {
+    const row = database().prepare("SELECT enabled, is_admin FROM access_grants WHERE address_key = ?").get(addressKey) as { enabled?: number; is_admin?: number } | undefined;
+    return Boolean(row?.enabled && row?.is_admin);
+  } catch {
+    return false;
+  }
+}
+
+function isBuiltInAdminAddress(address: string): boolean {
   return ADMIN_ADDRESS_KEYS.has(address.toLowerCase());
 }
 
@@ -2987,6 +2998,7 @@ function database(): DatabaseSync {
       enabled INTEGER NOT NULL DEFAULT 1,
       capabilities_json TEXT NOT NULL,
       max_wallets INTEGER NOT NULL DEFAULT 100,
+      is_admin INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -2994,6 +3006,9 @@ function database(): DatabaseSync {
   const accessGrantColumns = userDatabase.prepare("PRAGMA table_info(access_grants)").all() as Array<{ name?: string }>;
   if (!accessGrantColumns.some((column) => column.name === "max_wallets")) {
     userDatabase.exec("ALTER TABLE access_grants ADD COLUMN max_wallets INTEGER NOT NULL DEFAULT 100");
+  }
+  if (!accessGrantColumns.some((column) => column.name === "is_admin")) {
+    userDatabase.exec("ALTER TABLE access_grants ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
   }
   try {
     chmodSync(DATABASE_PATH, 0o600);
@@ -3009,6 +3024,7 @@ type AccessGrantRow = {
   enabled: number;
   capabilities_json: string;
   max_wallets: number;
+  is_admin: number;
   created_at: string;
   updated_at: string;
 };
@@ -3016,7 +3032,7 @@ type AccessGrantRow = {
 function accessGrantFor(addressKey: string): AccessGrantRow | undefined {
   return database()
     .prepare(
-      "SELECT address_key, wallet_address, enabled, capabilities_json, max_wallets, created_at, updated_at FROM access_grants WHERE address_key = ?",
+      "SELECT address_key, wallet_address, enabled, capabilities_json, max_wallets, is_admin, created_at, updated_at FROM access_grants WHERE address_key = ?",
     )
     .get(addressKey) as AccessGrantRow | undefined;
 }
@@ -3090,6 +3106,7 @@ function publicAccessGrant(row: AccessGrantRow) {
     enabled: Boolean(row.enabled),
     capabilities,
     maxWallets: Math.max(0, Math.min(MAX_WALLETS, Number(row.max_wallets))),
+    isAdmin: Boolean(row.is_admin),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3679,7 +3696,7 @@ app.get(
     requireAdmin(req);
     const rows = database()
       .prepare(
-        "SELECT address_key, wallet_address, enabled, capabilities_json, max_wallets, created_at, updated_at FROM access_grants ORDER BY updated_at DESC",
+        "SELECT address_key, wallet_address, enabled, capabilities_json, max_wallets, is_admin, created_at, updated_at FROM access_grants ORDER BY updated_at DESC",
       )
       .all() as AccessGrantRow[];
     res.setHeader("Cache-Control", "no-store");
@@ -3697,7 +3714,7 @@ app.put(
   asyncRoute(async (req, res) => {
     requireAdmin(req);
     const address = requireAddress(req.params.address, "address");
-    if (isAdminAddress(address)) throw new ApiError(400, "The built-in administrator cannot be restricted");
+    if (isBuiltInAdminAddress(address)) throw new ApiError(400, "The built-in administrator cannot be restricted");
     const body = (req.body || {}) as Record<string, unknown>;
     if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
       throw new ApiError(400, "enabled must be a boolean");
@@ -3706,18 +3723,23 @@ app.put(
     if (!Number.isSafeInteger(maxWallets) || maxWallets < 0 || maxWallets > MAX_WALLETS) {
       throw new ApiError(400, `maxWallets must be an integer between 0 and ${MAX_WALLETS}`);
     }
+    if (body.isAdmin !== undefined && typeof body.isAdmin !== "boolean") {
+      throw new ApiError(400, "isAdmin must be a boolean");
+    }
+    const isAdmin = body.isAdmin === true;
     const capabilities = normalizeCapabilities(body.capabilities);
     const now = new Date().toISOString();
     database()
       .prepare(
         `INSERT INTO access_grants
-          (address_key, wallet_address, enabled, capabilities_json, max_wallets, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+          (address_key, wallet_address, enabled, capabilities_json, max_wallets, is_admin, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(address_key) DO UPDATE SET
            wallet_address = excluded.wallet_address,
            enabled = excluded.enabled,
            capabilities_json = excluded.capabilities_json,
            max_wallets = excluded.max_wallets,
+           is_admin = excluded.is_admin,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -3726,6 +3748,7 @@ app.put(
         body.enabled === false ? 0 : 1,
         JSON.stringify(capabilities),
         maxWallets,
+        isAdmin ? 1 : 0,
         now,
         now,
       );
@@ -3739,7 +3762,7 @@ app.delete(
   asyncRoute(async (req, res) => {
     requireAdmin(req);
     const address = requireAddress(req.params.address, "address");
-    if (isAdminAddress(address)) throw new ApiError(400, "The built-in administrator cannot be removed");
+    if (isBuiltInAdminAddress(address)) throw new ApiError(400, "The built-in administrator cannot be removed");
     database().prepare("DELETE FROM access_grants WHERE address_key = ?").run(address.toLowerCase());
     res.json({ success: true, address });
   }),
