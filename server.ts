@@ -2460,7 +2460,34 @@ async function scheduledOpenSeaTransaction(job: SchedulerJob, privateKey: string
     throw new Error(prepared.simulation.reason || "Scheduled OpenSea action simulation failed");
   }
   const { simulation: _simulation, ...signable } = prepared;
-  return signTransactionPayload(signable, privateKey, job.chain, job.endpoints);
+  return signTransactionPayload(signable, privateKey, job.chain, job.endpoints, job.feeTier);
+}
+
+// Local SeaDrop plans are already assembled when the job is created. For the
+// hot path, only fetch the pending nonce and current fee snapshot here; avoid a
+// second simulation and gas-estimation round trip immediately before mint time.
+async function signScheduledLocalTransaction(job: SchedulerJob, privateKey: string) {
+  if (!job.plan) throw new Error("Scheduled on-chain mint plan is unavailable");
+  const wallet = walletFromPrivateKey(privateKey);
+  const setup = await withRpcFallback(job.endpoints, async (url) => {
+    const provider = providerFor(url, job.chain);
+    const [nonce, fees] = await Promise.all([
+      provider.getTransactionCount(wallet.address, "pending"),
+      getFeeSnapshot(provider),
+    ]);
+    return { nonce, fees: applyFeeTier(fees, job.feeTier) };
+  });
+  return wallet.signTransaction({
+    to: job.plan.to,
+    data: job.plan.data,
+    value: job.plan.value,
+    chainId: job.chain.chainId,
+    type: 2,
+    nonce: setup.nonce,
+    gasLimit: 350_000n,
+    maxFeePerGas: setup.fees.maxFeePerGas,
+    maxPriorityFeePerGas: setup.fees.maxPriorityFeePerGas,
+  });
 }
 
 export function runIsolatedSchedulerTasks<T, R>(
@@ -2518,21 +2545,7 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
       async (wallet) => {
         const signedTransaction = job.openSea
           ? await scheduledOpenSeaTransaction(job, wallet.privateKey)
-          : await (async () => {
-              if (!job.plan) throw new Error("Scheduled on-chain mint plan is unavailable");
-              return signTransactionPayload(
-                {
-                  to: job.plan.to,
-                  data: job.plan.data,
-                  value: job.plan.value.toString(),
-                  chainId: job.chain.chainId,
-                },
-                wallet.privateKey,
-                job.chain,
-                job.endpoints,
-                job.feeTier,
-              );
-            })();
+          : await signScheduledLocalTransaction(job, wallet.privateKey);
         return { wallet, signedTransaction };
       },
     );
@@ -2621,7 +2634,6 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
       );
       if (readyWallets.length) {
         readyWallets.forEach((wallet) => (wallet.status = "broadcasting"));
-        persistSchedulerJob(job);
         const settled = await runSchedulerWorkerPool(
           readyWallets,
           job.parallelWorkers,
@@ -2664,6 +2676,10 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
             });
           }
         });
+        // Keep the broadcast path free of a synchronous SQLite write; persist
+        // the wallet outcomes immediately after the parallel RPC blast returns.
+        job.updatedAt = new Date().toISOString();
+        persistSchedulerJob(job);
       }
       const failedNow = job.wallets.filter((wallet) => wallet.status === "failed");
       if (!job.retryOnFailure || !failedNow.length || Date.now() >= retryDeadline) break;
@@ -2728,8 +2744,11 @@ async function schedulerTick() {
       if (job.status !== "pending") continue;
       if (job.targetTime !== undefined) {
         const remaining = job.targetTime - now;
-        if (remaining <= 45_000) void warmRpcEndpoints(job);
-        const armWindow = 30_000;
+        if (remaining <= 90_000) void warmRpcEndpoints(job);
+        // Local plans can be signed earlier because calldata is immutable. OpenSea
+        // actions stay on the shorter window because their wallet-specific quote
+        // must correspond to the active phase.
+        const armWindow = job.openSea ? 30_000 : 60_000;
         if (remaining <= armWindow && remaining > 0) void armSchedulerJob(job);
         if (remaining <= 0) void executeSchedulerJob(job);
         continue;
