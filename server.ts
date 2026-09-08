@@ -2415,6 +2415,22 @@ async function validateScheduledOpenSeaSource(
   }
 }
 
+/**
+ * A public SeaDrop stage can be scheduled without an OpenSea mint-action
+ * request.  OpenSea is retained as a fallback for collections that do not
+ * expose a canonical SeaDrop public drop (or whose fee-recipient configuration
+ * cannot be discovered locally).  Do not fall back for arbitrary RPC errors:
+ * hiding an unavailable RPC behind an OpenSea request only adds latency and
+ * makes the failure harder to diagnose.
+ */
+function isPublicPlanUnavailable(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return (
+    message.includes("no seadrop public stage is configured") ||
+    message.includes("drop restricts fee recipients, but no allowed recipient was found")
+  );
+}
+
 async function scheduledOpenSeaTransaction(job: SchedulerJob, privateKey: string) {
   if (!job.openSea?.apiKey) throw new Error("The scheduled OpenSea API key is unavailable");
   const wallet = walletFromPrivateKey(privateKey);
@@ -4884,14 +4900,43 @@ app.post(
       contractAddress = requireAddress(body.contractAddress || body.nftContract);
       mode = modeFrom(body);
       quantity = requireQuantity(body.quantity);
-      const keyRecord = await resolveOpenSeaApiKey(body.openseaApiKey);
-      await validateScheduledOpenSeaSource(
-        requestedSlug,
-        keyRecord.key,
-        contractAddress,
-        chain,
-      );
-      openSea = { slug: requestedSlug, apiKey: keyRecord.key, keySource: keyRecord.source };
+
+      // Public SeaDrop calldata is deterministic and can be prepared well
+      // before the target time.  Prefer this local path even when the user
+      // supplied an OpenSea slug; an OpenSea request is only needed for a
+      // non-standard collection that has no discoverable public SeaDrop drop.
+      if (mode === "public") {
+        try {
+          const built = await buildMintPlan({ ...body, slug: undefined });
+          chain = built.chain;
+          endpoints = built.endpoints;
+          plan = built.plan;
+          contractAddress = plan.contractAddress;
+          mode = plan.mode;
+          quantity = requireQuantity(body.quantity);
+        } catch (error) {
+          if (!isPublicPlanUnavailable(error)) throw error;
+          const keyRecord = await resolveOpenSeaApiKey(body.openseaApiKey);
+          await validateScheduledOpenSeaSource(
+            requestedSlug,
+            keyRecord.key,
+            contractAddress,
+            chain,
+          );
+          openSea = { slug: requestedSlug, apiKey: keyRecord.key, keySource: keyRecord.source };
+        }
+      } else {
+        // Allowlist/presale stages require OpenSea's wallet-specific signed
+        // action (or a caller-supplied voucher), so keep that path explicit.
+        const keyRecord = await resolveOpenSeaApiKey(body.openseaApiKey);
+        await validateScheduledOpenSeaSource(
+          requestedSlug,
+          keyRecord.key,
+          contractAddress,
+          chain,
+        );
+        openSea = { slug: requestedSlug, apiKey: keyRecord.key, keySource: keyRecord.source };
+      }
     } else {
       const built = await buildMintPlan(body);
       chain = built.chain;
