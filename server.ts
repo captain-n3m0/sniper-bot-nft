@@ -1278,6 +1278,49 @@ interface BroadcastRecord {
 
 const broadcasts = new Map<string, BroadcastRecord>();
 
+type MintLogStatus = "success" | "failed";
+
+interface MintLogInput {
+  ownerAddressKey: string;
+  ownerAddress: string;
+  chain: ChainConfig;
+  walletAddress?: string;
+  status: MintLogStatus;
+  quantity?: number;
+  txHash?: string;
+  error?: unknown;
+  source: string;
+  jobId?: string;
+}
+
+function persistMintLog(input: MintLogInput) {
+  try {
+    const createdAt = new Date().toISOString();
+    const walletAddress = input.walletAddress && isAddress(input.walletAddress) ? getAddress(input.walletAddress) : null;
+    database()
+      .prepare(
+        `INSERT INTO mint_logs
+          (id, address_key, wallet_address, chain_key, status, quantity, tx_hash, error, source, job_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        input.ownerAddressKey,
+        walletAddress,
+        input.chain.key,
+        input.status,
+        Math.max(1, Math.min(MAX_WALLETS, Math.floor(Number(input.quantity) || 1))),
+        input.txHash || null,
+        input.error ? errorMessage(input.error).slice(0, 500) : null,
+        input.source.slice(0, 60),
+        input.jobId || null,
+        createdAt,
+      );
+  } catch (error) {
+    logServerError("mint-log-persist", error, { chain: input.chain.key, status: input.status, source: input.source });
+  }
+}
+
 async function sendRawTransaction(url: string, signedTx: string, expectedHash: string) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
@@ -2512,6 +2555,17 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
       } else {
         wallet.status = "failed";
         wallet.error = errorMessage(result.reason).slice(0, 300);
+        persistMintLog({
+          ownerAddressKey: job.ownerAddressKey,
+          ownerAddress: getAddress(job.ownerAddressKey),
+          chain: job.chain,
+          walletAddress: wallet.address,
+          status: "failed",
+          quantity: job.quantity,
+          source: "scheduler-preparation",
+          jobId: job.id,
+          error: result.reason,
+        });
       }
     });
     const ready = job.wallets.filter((wallet) => wallet.status === "ready").length;
@@ -2583,9 +2637,31 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
             wallet.submissionLatencyMs = result.value.submissionLatencyMs;
             wallet.targetOffsetMs = job.targetTime === undefined ? undefined : Date.parse(result.value.acceptedAt) - job.targetTime;
             wallet.error = undefined;
+            persistMintLog({
+              ownerAddressKey: job.ownerAddressKey,
+              ownerAddress: getAddress(job.ownerAddressKey),
+              chain: job.chain,
+              walletAddress: wallet.address,
+              status: "success",
+              quantity: job.quantity,
+              txHash: result.value.txHash,
+              source: "scheduler",
+              jobId: job.id,
+            });
           } else {
             wallet.status = "failed";
             wallet.error = errorMessage(result.reason).slice(0, 300);
+            persistMintLog({
+              ownerAddressKey: job.ownerAddressKey,
+              ownerAddress: getAddress(job.ownerAddressKey),
+              chain: job.chain,
+              walletAddress: wallet.address,
+              status: "failed",
+              quantity: job.quantity,
+              source: "scheduler",
+              jobId: job.id,
+              error: result.reason,
+            });
           }
         });
       }
@@ -2991,6 +3067,25 @@ function database(): DatabaseSync {
       ON scheduler_jobs(address_key, created_at DESC);
     CREATE INDEX IF NOT EXISTS scheduler_jobs_status_target
       ON scheduler_jobs(status, target_time);
+
+    CREATE TABLE IF NOT EXISTS mint_logs (
+      id TEXT PRIMARY KEY,
+      address_key TEXT NOT NULL REFERENCES users(address_key) ON DELETE CASCADE,
+      wallet_address TEXT,
+      chain_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+      quantity INTEGER NOT NULL DEFAULT 1,
+      tx_hash TEXT,
+      error TEXT,
+      source TEXT NOT NULL,
+      job_id TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS mint_logs_owner_created
+      ON mint_logs(address_key, created_at DESC);
+    CREATE INDEX IF NOT EXISTS mint_logs_status_created
+      ON mint_logs(status, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS access_grants (
       address_key TEXT PRIMARY KEY,
@@ -3824,6 +3919,25 @@ app.get(
   }),
 );
 
+app.get(
+  "/api/admin/logs",
+  asyncRoute(async (req, res) => {
+    requireAdmin(req);
+    const limit = Number(req.query.limit || 2_000);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, logs: readMintLogs(undefined, limit) });
+  }),
+);
+
+app.delete(
+  "/api/admin/logs",
+  asyncRoute(async (req, res) => {
+    requireAdmin(req);
+    const result = database().prepare("DELETE FROM mint_logs").run();
+    res.json({ success: true, deleted: Number(result.changes || 0) });
+  }),
+);
+
 app.put(
   "/api/admin/access/:address",
   asyncRoute(async (req, res) => {
@@ -3923,6 +4037,34 @@ app.put(
     const wallets = writeUserWallets(session, req.body?.wallets);
     res.setHeader("Cache-Control", "no-store");
     res.json({ success: true, wallets, count: wallets.length });
+  }),
+);
+
+function readMintLogs(addressKey?: string, limit = 500) {
+  const safeLimit = Math.max(1, Math.min(2_000, Math.floor(limit) || 500));
+  const rows = addressKey
+    ? database()
+        .prepare(
+          `SELECT id, address_key, wallet_address, chain_key, status, quantity, tx_hash, error, source, job_id, created_at
+           FROM mint_logs WHERE address_key = ? ORDER BY created_at DESC LIMIT ?`,
+        )
+        .all(addressKey, safeLimit)
+    : database()
+        .prepare(
+          `SELECT id, address_key, wallet_address, chain_key, status, quantity, tx_hash, error, source, job_id, created_at
+           FROM mint_logs ORDER BY created_at DESC LIMIT ?`,
+        )
+        .all(safeLimit);
+  return rows;
+}
+
+app.get(
+  "/api/user/mint-logs",
+  asyncRoute(async (req, res) => {
+    const session = requireSession(req);
+    const limit = Number(req.query.limit || 500);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, logs: readMintLogs(session.addressKey, limit) });
   }),
 );
 
@@ -4178,13 +4320,26 @@ app.post(
 app.post(
   "/api/blast-mint",
   asyncRoute(async (req, res) => {
-    requireBotAccess(req, "sniper");
+    const session = requireBotAccess(req, "sniper");
     const body = (req.body || {}) as Record<string, any>;
     const chain = requireChain(body.chain);
     const endpoints = rpcUrlsFor(chain, body);
     if (body.signedTx) {
-      const result = await broadcastSignedTransaction(String(body.signedTx), chain, endpoints);
-      return res.json({ success: true, ...result });
+      const signedTx = String(body.signedTx);
+      let walletAddress: string | undefined;
+      try {
+        walletAddress = Transaction.from(signedTx).from || undefined;
+      } catch {
+        // broadcastSignedTransaction returns the user-facing validation error.
+      }
+      try {
+        const result = await broadcastSignedTransaction(signedTx, chain, endpoints);
+        persistMintLog({ ownerAddressKey: session.addressKey, ownerAddress: session.address, chain, walletAddress, status: "success", txHash: result.txHash, source: "sniper" });
+        return res.json({ success: true, ...result });
+      } catch (error) {
+        persistMintLog({ ownerAddressKey: session.addressKey, ownerAddress: session.address, chain, walletAddress, status: "failed", source: "sniper", error });
+        throw error;
+      }
     }
     const keys = privateKeysFrom(body);
     const transaction = body.transaction || body.tx;
@@ -4200,9 +4355,24 @@ app.post(
         ),
       ),
     );
-    const results = await Promise.all(
-      signedTransactions.map((signedTx) => broadcastSignedTransaction(signedTx, chain, endpoints)),
+    const settled = await Promise.allSettled(
+      signedTransactions.map(async (signedTx, index) => {
+        const walletAddress = Transaction.from(signedTx).from || undefined;
+        try {
+          const result = await broadcastSignedTransaction(signedTx, chain, endpoints);
+          persistMintLog({ ownerAddressKey: session.addressKey, ownerAddress: session.address, chain, walletAddress, status: "success", txHash: result.txHash, quantity: body.quantity, source: "sniper" });
+          return result;
+        } catch (error) {
+          persistMintLog({ ownerAddressKey: session.addressKey, ownerAddress: session.address, chain, walletAddress, status: "failed", quantity: body.quantity, source: "sniper", error });
+          throw error;
+        }
+      }),
     );
+    const results = settled.filter((item): item is PromiseFulfilledResult<Awaited<ReturnType<typeof broadcastSignedTransaction>>> => item.status === "fulfilled").map((item) => item.value);
+    const failures = settled.filter((item) => item.status === "rejected");
+    if (!results.length) {
+      throw new ApiError(502, "Every mint worker failed to broadcast", failures.map((item: any) => errorMessage(item.reason).slice(0, 180)));
+    }
     return res.json({
       success: true,
       txHash: results.length === 1 ? results[0].txHash : undefined,

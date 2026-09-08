@@ -28,6 +28,19 @@ interface AccessState {
   address: string;
 }
 
+interface MintLogRecord {
+  id: string;
+  wallet_address?: string | null;
+  chain_key: string;
+  status: 'success' | 'failed';
+  quantity: number;
+  tx_hash?: string | null;
+  error?: string | null;
+  source: string;
+  job_id?: string | null;
+  created_at: string;
+}
+
 interface SniperFormState {
   contractAddress: string;
   quantity: string;
@@ -113,6 +126,7 @@ export const Dashboard = () => {
     { time: new Date().toLocaleTimeString(), type: 'SYSTEM', message: 'Terminal initialized. Ready for instructions.', color: 'text-neutral-500' }
   ]);
   const [isSniping, setIsSniping] = useState(false);
+  const [retainedMintLogs, setRetainedMintLogs] = useState<MintLogRecord[]>([]);
 
   const addLog = (type: string, message: string, color: string) => {
     setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type, message, color }].slice(-MAX_CLIENT_LOGS));
@@ -222,6 +236,29 @@ export const Dashboard = () => {
     };
 
     void loadConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, authToken]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !authToken) {
+      setRetainedMintLogs([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch('/api/user/mint-logs?limit=500', {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || !data.success) throw new Error(data.error || 'Could not load retained mint logs');
+        if (!cancelled) setRetainedMintLogs(Array.isArray(data.logs) ? data.logs : []);
+      } catch (error: any) {
+        if (!cancelled) addLog('ERROR', `Mint log history unavailable: ${error?.message || 'Unknown error'}`, 'text-red-500');
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -793,13 +830,20 @@ export const Dashboard = () => {
                 <span className="font-mono text-xs font-semibold uppercase tracking-widest text-neutral-400">Execution Logs</span>
               </div>
               <div className="flex items-center gap-3">
-                <button type="button" onClick={() => setLogs([])} className="font-mono text-[10px] uppercase tracking-widest text-neutral-500 transition-colors hover:text-white">Clear</button>
+                <span className="font-mono text-[10px] uppercase tracking-widest text-neutral-600">Retained history</span>
                 <div className="h-3 w-3 rounded-full bg-red-500/80" />
                 <div className="h-3 w-3 rounded-full bg-yellow-500/80" />
                 <div className="h-3 w-3 rounded-full bg-green-500/80" />
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-6 font-mono text-xs leading-loose text-neutral-300 md:text-sm">
+              {retainedMintLogs.map((log) => (
+                <div key={`retained-${log.id}`} className="mb-2 flex items-start gap-4">
+                  <span className="shrink-0 text-neutral-600">[{new Date(log.created_at).toLocaleTimeString()}]</span>
+                  <span className={`w-16 shrink-0 font-semibold ${log.status === 'success' ? 'text-synapse-emerald' : 'text-red-500'}`}>{log.status === 'success' ? 'SUCCESS' : 'ERROR'}</span>
+                  <span className="break-all">[{log.source}] {log.wallet_address ? `${shortAddress(log.wallet_address)} ` : ''}{log.status === 'success' ? `mint accepted${log.tx_hash ? ` · ${log.tx_hash}` : ''}` : (log.error || 'Mint failed')}</span>
+                </div>
+              ))}
               {logs.map((log, index) => (
                 <div key={index} className="mb-2 flex items-start gap-4">
                   <span className="text-neutral-600 shrink-0">[{log.time}]</span>

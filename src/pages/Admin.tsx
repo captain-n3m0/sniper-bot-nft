@@ -34,6 +34,19 @@ type Grant = {
   createdAt: string;
   updatedAt: string;
 };
+type MintLog = {
+  id: string;
+  address_key: string;
+  wallet_address: string | null;
+  chain_key: string;
+  status: "success" | "failed";
+  quantity: number;
+  tx_hash: string | null;
+  error: string | null;
+  source: string;
+  job_id: string | null;
+  created_at: string;
+};
 type AdminMetrics = {
   generatedAt: string;
   uptimeSeconds: number;
@@ -190,6 +203,7 @@ export const Admin = () => {
   const [isAdmin, setIsAdmin] = useState(false);
   const [grants, setGrants] = useState<Grant[]>([]);
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
+  const [mintLogs, setMintLogs] = useState<MintLog[]>([]);
   const [selected, setSelected] = useState<Grant | null>(null);
   const [newAddress, setNewAddress] = useState("");
   const [newCapabilities, setNewCapabilities] =
@@ -256,6 +270,14 @@ export const Admin = () => {
       setLoadingMetrics(false);
     }
   };
+  const loadMintLogs = async () => {
+    try {
+      const body = await request("/api/admin/logs?limit=2000");
+      setMintLogs(Array.isArray(body.logs) ? body.logs : []);
+    } catch (err: any) {
+      setMetricsError(err?.message || "Could not load mint logs");
+    }
+  };
 
   useEffect(() => {
     if (token) void loadGrants();
@@ -263,7 +285,11 @@ export const Admin = () => {
   useEffect(() => {
     if (!isAdmin) return;
     void loadMetrics();
-    const interval = window.setInterval(() => void loadMetrics(), 15_000);
+    void loadMintLogs();
+    const interval = window.setInterval(() => {
+      void loadMetrics();
+      void loadMintLogs();
+    }, 15_000);
     return () => window.clearInterval(interval);
   }, [isAdmin, token]);
 
@@ -354,6 +380,20 @@ export const Admin = () => {
       void loadMetrics();
     } catch (err: any) {
       setError(err?.message || "Could not remove access grant");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const deleteMintLogs = async () => {
+    if (!mintLogs.length || !window.confirm(`Delete all ${mintLogs.length} retained mint logs? This cannot be undone.`)) return;
+    setSaving(true);
+    setError("");
+    try {
+      const body = await request("/api/admin/logs", { method: "DELETE" });
+      setMintLogs([]);
+      setNotice(`Deleted ${Number(body.deleted || 0)} retained mint log(s).`);
+    } catch (err: any) {
+      setError(err?.message || "Could not delete mint logs");
     } finally {
       setSaving(false);
     }
@@ -770,6 +810,17 @@ export const Admin = () => {
                     </div>
                   </>
                 )}
+              </section>
+              <section className="mb-8 rounded-[24px] border border-white/10 bg-white/[0.02] p-7">
+                <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-5">
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-widest text-synapse-cyan">Immutable user history</p>
+                    <h2 className="mt-1 font-serif text-2xl">Mint execution logs</h2>
+                    <p className="mt-2 text-xs text-neutral-500">Successful and failed wallet attempts are retained for users and administrators. Only administrators can delete them.</p>
+                  </div>
+                  <button type="button" onClick={() => void deleteMintLogs()} disabled={!mintLogs.length || saving} className="rounded-xl border border-red-500/25 px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-red-300 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-40">Delete all logs</button>
+                </div>
+                {mintLogs.length === 0 ? <p className="py-8 text-center text-sm text-neutral-500">No retained mint attempts.</p> : <div className="max-h-[460px] overflow-y-auto"><table className="w-full min-w-[760px] text-left"><thead className="font-mono text-[10px] uppercase tracking-widest text-neutral-600"><tr><th className="pb-3">Time</th><th className="pb-3">User</th><th className="pb-3">Execution wallet</th><th className="pb-3">Network</th><th className="pb-3">Result</th><th className="pb-3">Details</th></tr></thead><tbody className="text-xs">{mintLogs.map((log) => <tr key={log.id} className="border-t border-white/5 align-top"><td className="py-3 text-neutral-500">{formatTime(log.created_at)}</td><td className="py-3 font-mono text-white">{shortAddress(log.address_key)}</td><td className="py-3 font-mono text-neutral-400">{log.wallet_address ? shortAddress(log.wallet_address) : "—"}</td><td className="py-3 text-neutral-400">{log.chain_key}</td><td className={`py-3 font-mono uppercase tracking-widest ${log.status === "success" ? "text-synapse-emerald" : "text-red-400"}`}>{log.status}</td><td className="max-w-[300px] py-3 text-neutral-500"><span className="font-mono text-[10px]">{log.source} • qty {log.quantity}</span>{log.tx_hash && <div className="truncate font-mono text-[10px] text-synapse-cyan" title={log.tx_hash}>{log.tx_hash}</div>}{log.error && <div className="line-clamp-2" title={log.error}>{log.error}</div>}</td></tr>)}</tbody></table></div>}
               </section>
               <section id="access-editor" className="mb-8 grid gap-8 lg:grid-cols-[0.9fr_1.1fr]">
                 <div className="rounded-[24px] border border-white/10 bg-white/[0.02] p-7">
