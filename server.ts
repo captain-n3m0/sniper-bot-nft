@@ -2459,12 +2459,9 @@ async function fetchScheduledOpenSeaTransaction(job: SchedulerJob, wallet: Walle
   if (decoded.valueMatches === false) {
     throw new Error("OpenSea scheduled action value does not match its signed mint price");
   }
-  const deploymentWarning = await mintContractDeploymentWarning(
-    job.chain,
-    job.endpoints,
-    decoded.nftContract,
-  );
-  if (deploymentWarning) throw new Error(deploymentWarning);
+  // The action's contract and recipient are validated above. Avoid an extra
+  // getCode RPC round trip for every wallet during the launch window; the
+  // broadcast result is the authoritative on-chain outcome.
   return transaction;
 }
 
@@ -2477,22 +2474,29 @@ async function scheduledOpenSeaTransaction(
   const transaction = cached
     ? { to: cached.to, data: cached.data, value: BigInt(cached.value) }
     : await fetchScheduledOpenSeaTransaction(job, wallet);
-  const prepared = await prepareForWallet(
-    job.chain,
-    job.endpoints,
-    transaction,
-    wallet,
-    job.feeTier,
-  );
-  if (
-    !prepared.simulation.ok &&
-    (isInsufficientBalanceReason(prepared.simulation.reason) ||
-      isDefinitiveEligibilityReason(String(prepared.simulation.reason || "")))
-  ) {
-    throw new Error(prepared.simulation.reason || "Scheduled OpenSea action simulation failed");
-  }
-  const { simulation: _simulation, ...signable } = prepared;
-  return signTransactionPayload(signable, privateKey, job.chain, job.endpoints, job.feeTier);
+  // The OpenSea action has already been validated for this wallet. Fetch only
+  // the pending nonce and current fee snapshot at launch, then sign
+  // immediately. A revert or insufficient-balance error is captured from the
+  // broadcast result and can trigger the configured wallet retry.
+  const setup = await withRpcFallback(job.endpoints, async (url) => {
+    const provider = providerFor(url, job.chain);
+    const [nonce, fees] = await Promise.all([
+      provider.getTransactionCount(wallet.address, "pending"),
+      getFeeSnapshot(provider),
+    ]);
+    return { nonce, fees: applyFeeTier(fees, job.feeTier) };
+  });
+  return wallet.signTransaction({
+    to: transaction.to,
+    data: transaction.data,
+    value: transaction.value,
+    chainId: job.chain.chainId,
+    type: 2,
+    nonce: setup.nonce,
+    gasLimit: 350_000n,
+    maxFeePerGas: setup.fees.maxFeePerGas,
+    maxPriorityFeePerGas: setup.fees.maxPriorityFeePerGas,
+  });
 }
 
 // Local SeaDrop plans are already assembled when the job is created. For the
