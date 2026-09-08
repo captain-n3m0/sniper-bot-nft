@@ -2124,6 +2124,7 @@ type SchedulerJobStatus = "pending" | "paused" | "running" | "completed" | "fail
 type SchedulerWalletStatus = "queued" | "preparing" | "ready" | "broadcasting" | "completed" | "failed" | "stopped";
 const MAX_SCHEDULER_WALLETS = 50;
 const MAX_SCHEDULER_WORKERS = 50;
+const SCHEDULER_RETRY_INTERVAL_MS = 1_000;
 
 interface SchedulerWalletTask {
   id: string;
@@ -2703,10 +2704,10 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
         wallet.status = "queued";
         wallet.signedTransaction = undefined;
       });
-      job.error = `Retrying ${failedNow.length} failed wallet(s) in 2 seconds`;
+      job.error = `Retrying ${failedNow.length} failed wallet(s) in 1 second`;
       job.updatedAt = new Date().toISOString();
       persistSchedulerJob(job);
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await new Promise((resolve) => setTimeout(resolve, SCHEDULER_RETRY_INTERVAL_MS));
     }
     const completed = job.wallets.filter((wallet) => wallet.status === "completed");
     const failed = job.wallets.filter((wallet) => wallet.status === "failed");
