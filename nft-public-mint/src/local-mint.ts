@@ -60,22 +60,22 @@ export async function localPublicSnipe(opts: LocalSnipeOpts): Promise<void> {
 
   // ── Sign everything now, well before the stage opens ──
   const signStart = performance.now();
-  const prepared: { idx: number; address: string; blast: PreparedBlast }[] = [];
-
-  for (let i = 0; i < wallets.length; i++) {
-    const rawTx = await wallets[i].signTransaction({
-      to: plan.to,
-      data: plan.data,
-      value: plan.value,
-      nonce: nonces[i],
-      maxFeePerGas,
-      maxPriorityFeePerGas: maxPriorityFee,
-      gasLimit: gasLimit || 250_000,
-      type: 2,
-      chainId,
-    });
-    prepared.push({ idx: i, address: wallets[i].address, blast: prepareBlast(rawTx) });
-  }
+  const prepared = await Promise.all(
+    wallets.map(async (wallet, i) => {
+      const rawTx = await wallet.signTransaction({
+        to: plan.to,
+        data: plan.data,
+        value: plan.value,
+        nonce: nonces[i],
+        maxFeePerGas,
+        maxPriorityFeePerGas: maxPriorityFee,
+        gasLimit: gasLimit || 250_000,
+        type: 2,
+        chainId,
+      });
+      return { idx: i, address: wallet.address, blast: prepareBlast(rawTx) };
+    }),
+  );
 
   console.log(
     chalk.green(
