@@ -2133,6 +2133,8 @@ interface SchedulerWalletTask {
   privateKey: string;
   status: SchedulerWalletStatus;
   signedTransaction?: string;
+  /** Encrypted-at-rest, wallet-specific OpenSea action cached before launch. */
+  openSeaTransaction?: { to: string; data: string; value: string };
   txHash?: string;
   acceptedBy?: string;
   acceptedAt?: string;
@@ -2349,6 +2351,7 @@ export function restoreSchedulerJobs() {
           if (!["completed", "failed"].includes(wallet.status)) wallet.status = "failed";
           wallet.privateKey = "";
           wallet.signedTransaction = undefined;
+          wallet.openSeaTransaction = undefined;
         });
         if (job.openSea) job.openSea.apiKey = "";
         job.updatedAt = new Date().toISOString();
@@ -2362,6 +2365,7 @@ export function restoreSchedulerJobs() {
           wallet.status = "failed";
           wallet.privateKey = "";
           wallet.signedTransaction = undefined;
+          wallet.openSeaTransaction = undefined;
         });
         if (job.openSea) job.openSea.apiKey = "";
         job.updatedAt = new Date().toISOString();
@@ -2432,9 +2436,8 @@ function isPublicPlanUnavailable(error: unknown): boolean {
   );
 }
 
-async function scheduledOpenSeaTransaction(job: SchedulerJob, privateKey: string) {
+async function fetchScheduledOpenSeaTransaction(job: SchedulerJob, wallet: Wallet) {
   if (!job.openSea?.apiKey) throw new Error("The scheduled OpenSea API key is unavailable");
-  const wallet = walletFromPrivateKey(privateKey);
   const action = await openSeaRequest(`/drops/${encodeURIComponent(job.openSea.slug)}/mint`, job.openSea.apiKey, {
     method: "POST",
     body: { minter: wallet.address, quantity: job.quantity },
@@ -2462,6 +2465,18 @@ async function scheduledOpenSeaTransaction(job: SchedulerJob, privateKey: string
     decoded.nftContract,
   );
   if (deploymentWarning) throw new Error(deploymentWarning);
+  return transaction;
+}
+
+async function scheduledOpenSeaTransaction(
+  job: SchedulerJob,
+  privateKey: string,
+  cached?: SchedulerWalletTask["openSeaTransaction"],
+) {
+  const wallet = walletFromPrivateKey(privateKey);
+  const transaction = cached
+    ? { to: cached.to, data: cached.data, value: BigInt(cached.value) }
+    : await fetchScheduledOpenSeaTransaction(job, wallet);
   const prepared = await prepareForWallet(
     job.chain,
     job.endpoints,
@@ -2541,6 +2556,13 @@ export async function runSchedulerWorkerPool<T, R>(
 async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> {
   if (job.arming || !["pending", "running"].includes(job.status)) return;
   if (!force && job.nextArmAttemptAt > Date.now()) return;
+  // OpenSea actions are stage-sensitive. Fetch them once in a small window
+  // before a timed launch, cache the action, and defer wallet signing until the
+  // launch moment. This prevents a pre-arm loop from hammering OpenSea while a
+  // stage is still inactive.
+  const prefetchOpenSea = Boolean(
+    job.openSea && job.targetTime !== undefined && Date.now() < job.targetTime,
+  );
   const candidates = job.wallets.filter(
     (wallet) =>
       !wallet.signedTransaction &&
@@ -2556,14 +2578,32 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
   job.updatedAt = new Date().toISOString();
   persistSchedulerJob(job);
   job.arming = (async () => {
+    const openSeaNeedsFetch = Boolean(
+      job.openSea && candidates.some((wallet) => !wallet.openSeaTransaction),
+    );
+    const workerCount = job.openSea && (prefetchOpenSea || openSeaNeedsFetch)
+      ? Math.min(job.parallelWorkers, 4)
+      : job.parallelWorkers;
     const settled = await runSchedulerWorkerPool(
       candidates,
-      job.parallelWorkers,
+      workerCount,
       async (wallet) => {
+        if (prefetchOpenSea) {
+          const action = await fetchScheduledOpenSeaTransaction(job, walletFromPrivateKey(wallet.privateKey));
+          return {
+            wallet,
+            signedTransaction: undefined,
+            openSeaTransaction: {
+              to: action.to,
+              data: action.data,
+              value: action.value.toString(),
+            },
+          };
+        }
         const signedTransaction = job.openSea
-          ? await scheduledOpenSeaTransaction(job, wallet.privateKey)
+          ? await scheduledOpenSeaTransaction(job, wallet.privateKey, wallet.openSeaTransaction)
           : await signScheduledLocalTransaction(job, wallet.privateKey);
-        return { wallet, signedTransaction };
+        return { wallet, signedTransaction, openSeaTransaction: undefined };
       },
     );
     if (job.deleted) return;
@@ -2571,6 +2611,7 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
       candidates.forEach((wallet) => {
         wallet.status = "stopped";
         wallet.signedTransaction = undefined;
+        wallet.openSeaTransaction = undefined;
       });
       job.updatedAt = new Date().toISOString();
       persistSchedulerJob(job);
@@ -2580,28 +2621,42 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
       const wallet = candidates[index];
       if (result.status === "fulfilled") {
         wallet.signedTransaction = result.value.signedTransaction;
-        wallet.status = "ready";
+        wallet.openSeaTransaction = result.value.openSeaTransaction;
+        wallet.status = result.value.signedTransaction ? "ready" : "queued";
         wallet.error = undefined;
       } else {
-        wallet.status = "failed";
+        // A prefetch miss (usually a 409 while the stage is not active yet)
+        // is not a mint failure. Keep the wallet queued for the launch-time
+        // request instead of exposing a false failure or retrying every tick.
+        wallet.status = prefetchOpenSea ? "queued" : "failed";
         wallet.error = errorMessage(result.reason).slice(0, 300);
-        persistMintLog({
-          ownerAddressKey: job.ownerAddressKey,
-          ownerAddress: getAddress(job.ownerAddressKey),
-          chain: job.chain,
-          walletAddress: wallet.address,
-          status: "failed",
-          quantity: job.quantity,
-          source: "scheduler-preparation",
-          jobId: job.id,
-          error: result.reason,
-        });
+        wallet.openSeaTransaction = undefined;
+        if (!prefetchOpenSea) {
+          persistMintLog({
+            ownerAddressKey: job.ownerAddressKey,
+            ownerAddress: getAddress(job.ownerAddressKey),
+            chain: job.chain,
+            walletAddress: wallet.address,
+            status: "failed",
+            quantity: job.quantity,
+            source: "scheduler-preparation",
+            jobId: job.id,
+            error: result.reason,
+          });
+        }
       }
     });
     const ready = job.wallets.filter((wallet) => wallet.status === "ready").length;
     const failed = job.wallets.filter((wallet) => wallet.status === "failed").length;
-    job.error = failed ? `${failed} wallet(s) could not be prepared; ${ready} wallet(s) are ready` : undefined;
-    job.nextArmAttemptAt = failed ? Date.now() + (job.openSea ? 1_000 : 500) : 0;
+    const queuedOpenSea = job.openSea && job.wallets.some(
+      (wallet) => wallet.status === "queued" && !wallet.signedTransaction,
+    );
+    job.error = prefetchOpenSea
+      ? (queuedOpenSea ? "OpenSea actions will be requested again at launch" : undefined)
+      : (failed ? `${failed} wallet(s) could not be prepared; ${ready} wallet(s) are ready` : undefined);
+    job.nextArmAttemptAt = prefetchOpenSea
+      ? (job.targetTime || 0)
+      : (failed ? Date.now() + (job.openSea ? SCHEDULER_RETRY_INTERVAL_MS : 500) : 0);
     job.updatedAt = new Date().toISOString();
     persistSchedulerJob(job);
   })();
@@ -2609,7 +2664,9 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
     await job.arming;
   } catch (error) {
     job.error = `Pre-sign failed; will retry at execution: ${errorMessage(error).slice(0, 200)}`;
-    job.nextArmAttemptAt = Date.now() + (job.openSea ? 1_000 : 500);
+    job.nextArmAttemptAt = prefetchOpenSea
+      ? (job.targetTime || 0)
+      : Date.now() + (job.openSea ? SCHEDULER_RETRY_INTERVAL_MS : 500);
     logServerError("scheduler-pre-sign", error, {
       jobId: job.id,
       chain: job.chain.key,
@@ -2643,6 +2700,7 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
         job.status = "stopped";
         job.wallets.forEach((wallet) => {
           if (!["completed", "failed"].includes(wallet.status)) wallet.status = "stopped";
+          wallet.openSeaTransaction = undefined;
         });
         return;
       }
@@ -2703,6 +2761,7 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
       failedNow.forEach((wallet) => {
         wallet.status = "queued";
         wallet.signedTransaction = undefined;
+        if (job.openSea) wallet.openSeaTransaction = undefined;
       });
       job.error = `Retrying ${failedNow.length} failed wallet(s) in 1 second`;
       job.updatedAt = new Date().toISOString();
@@ -2736,6 +2795,7 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
     job.wallets.forEach((wallet) => {
       wallet.privateKey = "";
       wallet.signedTransaction = undefined;
+      wallet.openSeaTransaction = undefined;
     });
     if (job.openSea) job.openSea.apiKey = "";
     job.updatedAt = new Date().toISOString();
@@ -2762,10 +2822,11 @@ async function schedulerTick() {
       if (job.targetTime !== undefined) {
         const remaining = job.targetTime - now;
         if (remaining <= 90_000) void warmRpcEndpoints(job);
-        // Local plans can be signed earlier because calldata is immutable. OpenSea
-        // actions stay on the shorter window because their wallet-specific quote
-        // must correspond to the active phase.
-        const armWindow = job.openSea ? 30_000 : 60_000;
+        // Local plans can be signed earlier because calldata is immutable.
+        // OpenSea actions are prefetched only in the final five seconds; they
+        // are cached and signed at launch so an inactive-stage response does
+        // not trigger a minute of repeated API calls.
+        const armWindow = job.openSea ? 5_000 : 60_000;
         if (remaining <= armWindow && remaining > 0) void armSchedulerJob(job);
         if (remaining <= 0) void executeSchedulerJob(job);
         continue;
@@ -2778,7 +2839,9 @@ async function schedulerTick() {
           );
           if (currentBlock >= job.targetBlock - 1) {
             void warmRpcEndpoints(job);
-            void armSchedulerJob(job);
+            // Wait until the target block for OpenSea's stage-sensitive action;
+            // local plans can safely be armed one block early.
+            if (!job.openSea) void armSchedulerJob(job);
           }
           if (currentBlock >= job.targetBlock) {
             if (job.recoveredAfterRestart) {
@@ -2788,6 +2851,7 @@ async function schedulerTick() {
                 wallet.status = "failed";
                 wallet.privateKey = "";
                 wallet.signedTransaction = undefined;
+                wallet.openSeaTransaction = undefined;
               });
               if (job.openSea) job.openSea.apiKey = "";
               job.updatedAt = new Date().toISOString();
@@ -5044,6 +5108,7 @@ app.put("/api/scheduler/jobs/:id", (req, res) => {
   job.wallets.forEach((wallet) => {
     wallet.status = "queued";
     wallet.signedTransaction = undefined;
+    wallet.openSeaTransaction = undefined;
     wallet.txHash = undefined;
     wallet.acceptedBy = undefined;
     wallet.acceptedAt = undefined;
@@ -5096,6 +5161,7 @@ app.post("/api/scheduler/jobs/:id/stop", (req, res) => {
       wallet.status = "stopped";
       wallet.privateKey = "";
       wallet.signedTransaction = undefined;
+      wallet.openSeaTransaction = undefined;
     });
     if (job.openSea) job.openSea.apiKey = "";
     schedulerJobs.delete(job.id);
@@ -5125,6 +5191,7 @@ app.delete("/api/scheduler/jobs/:id", (req, res) => {
     active.wallets.forEach((wallet) => {
       wallet.privateKey = "";
       wallet.signedTransaction = undefined;
+      wallet.openSeaTransaction = undefined;
     });
     if (active.openSea) active.openSea.apiKey = "";
     schedulerJobs.delete(active.id);
@@ -5143,6 +5210,7 @@ app.delete("/api/scheduler/jobs/:id/cancel", (req, res) => {
     wallet.status = "stopped";
     wallet.privateKey = "";
     wallet.signedTransaction = undefined;
+    wallet.openSeaTransaction = undefined;
   });
   if (job.openSea) job.openSea.apiKey = "";
   job.updatedAt = new Date().toISOString();
