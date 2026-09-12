@@ -2163,6 +2163,9 @@ interface SchedulerWalletTask {
   acceptedAt?: string;
   submissionLatencyMs?: number;
   targetOffsetMs?: number;
+  confirmedAt?: string;
+  blockNumber?: number;
+  gasUsed?: string;
   error?: string;
 }
 
@@ -2288,6 +2291,9 @@ function schedulerPublic(job: SchedulerJob) {
       acceptedAt: wallet.acceptedAt,
       submissionLatencyMs: wallet.submissionLatencyMs,
       targetOffsetMs: wallet.targetOffsetMs,
+      confirmedAt: wallet.confirmedAt,
+      blockNumber: wallet.blockNumber,
+      gasUsed: wallet.gasUsed,
       error: wallet.error,
     })),
     targetTime: job.targetTime ? new Date(job.targetTime).toISOString() : undefined,
@@ -2522,6 +2528,34 @@ async function scheduledOpenSeaTransaction(
   });
 }
 
+/**
+ * RPC acceptance only means a node queued the transaction.  Wait for the
+ * receipt before recording scheduler success so reverted FCFS/public mints
+ * cannot be presented as completed jobs.
+ */
+async function waitForSchedulerReceipt(
+  txHash: string,
+  chain: ChainConfig,
+  endpoints: string[],
+  timeoutMs = 120_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const receipt = await withRpcFallback(endpoints, (url) =>
+        providerFor(url, chain).getTransactionReceipt(txHash),
+      );
+      if (receipt) return receipt;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const detail = lastError ? `: ${errorMessage(lastError).slice(0, 160)}` : "";
+  throw new Error(`RPC accepted ${txHash}, but no transaction receipt was observed within ${timeoutMs / 1000}s${detail}`);
+}
+
 // Local SeaDrop plans are already assembled when the job is created. For the
 // hot path, only fetch the pending nonce and current fee snapshot here; avoid a
 // second simulation and gas-estimation round trip immediately before mint time.
@@ -2736,10 +2770,25 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
       );
       if (readyWallets.length) {
         readyWallets.forEach((wallet) => (wallet.status = "broadcasting"));
-        const settled = await runSchedulerWorkerPool(
+        const submitted = await runSchedulerWorkerPool(
           readyWallets,
           job.parallelWorkers,
           (wallet) => broadcastSignedTransaction(wallet.signedTransaction!, job.chain, job.endpoints),
+        );
+        const settled = await Promise.allSettled(
+          readyWallets.map(async (_wallet, index) => {
+            const submission = submitted[index];
+            if (submission.status !== "fulfilled") throw submission.reason;
+            const receipt = await waitForSchedulerReceipt(
+              submission.value.txHash,
+              job.chain,
+              job.endpoints,
+            );
+            if (receipt.status !== 1) {
+              throw new Error(`Transaction ${submission.value.txHash} reverted on-chain (receipt status ${receipt.status})`);
+            }
+            return { ...submission.value, receipt };
+          }),
         );
         settled.forEach((result, index) => {
           const wallet = readyWallets[index];
@@ -2750,6 +2799,9 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
             wallet.acceptedAt = result.value.acceptedAt;
             wallet.submissionLatencyMs = result.value.submissionLatencyMs;
             wallet.targetOffsetMs = job.targetTime === undefined ? undefined : Date.parse(result.value.acceptedAt) - job.targetTime;
+            wallet.confirmedAt = new Date().toISOString();
+            wallet.blockNumber = result.value.receipt.blockNumber;
+            wallet.gasUsed = result.value.receipt.gasUsed.toString();
             wallet.error = undefined;
             persistMintLog({
               ownerAddressKey: job.ownerAddressKey,

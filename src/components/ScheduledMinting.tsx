@@ -34,7 +34,7 @@ interface SchedulerJobSummary {
   walletCount: number;
   source: string;
   error?: string;
-  wallets?: Array<{ id: string; name: string; address: string; status: string; txHash?: string; error?: string; submissionLatencyMs?: number; targetOffsetMs?: number }>;
+  wallets?: Array<{ id: string; name: string; address: string; status: string; txHash?: string; error?: string; submissionLatencyMs?: number; targetOffsetMs?: number; confirmedAt?: string; blockNumber?: number; gasUsed?: string }>;
   parallelWorkers?: number;
   retryOnFailure: boolean;
   quantity?: number;
@@ -290,6 +290,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                           <span className={wallet.status === 'completed' ? 'text-emerald-400' : wallet.status === 'failed' ? 'text-red-400' : 'text-neutral-500'}>{wallet.status}</span>
                           {wallet.submissionLatencyMs !== undefined && <span className="ml-2 text-neutral-500">{wallet.submissionLatencyMs} ms RPC</span>}
                           {wallet.targetOffsetMs !== undefined && <span className="ml-2 text-neutral-600">({wallet.targetOffsetMs >= 0 ? '+' : ''}{wallet.targetOffsetMs} ms target)</span>}
+                          {wallet.blockNumber !== undefined && <span className="ml-2 text-neutral-600">block {wallet.blockNumber}</span>}
                         </span>
                       </div>
                     ))}
