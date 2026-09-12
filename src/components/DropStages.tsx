@@ -6,6 +6,7 @@ interface DropStagesProps {
   wallets: StoredWallet[];
   addLog: (type: string, message: string, color: string) => void;
   selectedChain: string;
+  authToken?: string;
   openSeaApiKey?: string;
   onOpenSeaApiKeyChange?: (value: string) => void;
   onDetectedChain?: (chain: string) => void;
@@ -54,6 +55,7 @@ export const DropStages = ({
   wallets,
   addLog,
   selectedChain,
+  authToken,
   openSeaApiKey,
   onOpenSeaApiKeyChange,
   onDetectedChain,
@@ -205,7 +207,10 @@ export const DropStages = ({
     try {
       const response = await fetch('/api/opensea/drop', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({ slug: reference, chain: selectedChain, apiKey: apiKey.trim() })
       });
 
@@ -284,7 +289,10 @@ export const DropStages = ({
 
       const response = await fetch('/api/simulate-mint', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify(payload)
       });
 

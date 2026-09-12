@@ -767,6 +767,7 @@ export const Dashboard = () => {
                 wallets={wallets} 
                 addLog={addLog} 
                 selectedChain={selectedChain}
+                authToken={authToken}
                 openSeaApiKey={form.openSeaApiKey}
                 onOpenSeaApiKeyChange={(openSeaApiKey) => setForm((current) => ({ ...current, openSeaApiKey }))}
                 onDetectedChain={setSelectedChain}
