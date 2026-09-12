@@ -209,9 +209,9 @@ export const DropStages = ({
       return {
         id: st.id || st.label || `stage-${idx}`,
         label: st.label || st.phase || `Stage ${idx + 1}`,
-        // Some OpenSea responses call FCFS/GTD stages "public".  The label
-        // is authoritative here because those stages need an exact action.
-        phase: allowlist ? 'presale' : (st.phase || 'public'),
+        // Keep OpenSea's original phase for display (for example, FCFS), while
+        // `isAllowlistStage` drives the wallet-specific action path below.
+        phase: st.phase || (allowlist ? 'presale' : 'public'),
         startTime: startSec,
         endTime: endSec,
         priceEth,
