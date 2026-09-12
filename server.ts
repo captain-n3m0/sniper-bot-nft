@@ -598,7 +598,30 @@ function recipientAddresses(value: unknown, sourceAddress: string): string[] {
 }
 
 function modeFrom(body: Record<string, any>): "public" | "allowlist" {
-  const mode = String(body.mode || body.dropMode || (body.isAllowlist ? "allowlist" : "public"))
+  // OpenSea can describe FCFS/GTD/team/community phases as "public" in the
+  // response even though they require the wallet-specific mint action. Keep a
+  // server-side guard so older clients cannot accidentally build mintPublic.
+  const stageDescriptor = [body.stageLabel, body.stagePhase, body.stageType, body.stage?.label, body.stage?.phase]
+    .filter((value) => value !== undefined && value !== null)
+    .join(" ")
+    .toLowerCase();
+  const actionStage = [
+    "allowlist",
+    "allow list",
+    "presale",
+    "private",
+    "token-gated",
+    "token gated",
+    "signed",
+    "fcfs",
+    "gtd",
+    "whitelist",
+    "team",
+    "community",
+  ].some((marker) => stageDescriptor.includes(marker));
+  const mode = String(
+    actionStage ? "allowlist" : body.mode || body.dropMode || (body.isAllowlist ? "allowlist" : "public"),
+  )
     .trim()
     .toLowerCase();
   if (["allowlist", "presale", "signed"].includes(mode)) return "allowlist";

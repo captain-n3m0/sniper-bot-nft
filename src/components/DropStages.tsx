@@ -18,7 +18,14 @@ interface DropStagesProps {
   onSelectStageForScheduler?: (
     contractAddress: string,
     targetTime: string,
-    context: { chain: string; slug?: string; openseaApiKey?: string; isAllowlist: boolean },
+    context: {
+      chain: string;
+      slug?: string;
+      openseaApiKey?: string;
+      isAllowlist: boolean;
+      stageLabel?: string;
+      stagePhase?: string;
+    },
   ) => void;
 }
 
@@ -34,6 +41,39 @@ interface StageInfo {
   timeRemainingStr: string;
   raw: any;
 }
+
+// OpenSea uses several names for wallet-gated stages.  FCFS/GTD phases are
+// still served through the wallet-specific mint action (usually mintSigned),
+// even when the API's phase field is misleadingly reported as "public".
+const isAllowlistStage = (stage: any): boolean => {
+  const descriptor = [
+    stage?.phase,
+    stage?.label,
+    stage?.name,
+    stage?.type,
+    stage?.stage_type,
+    stage?.stageType,
+    stage?.kind,
+  ]
+    .filter((value) => value !== undefined && value !== null)
+    .join(' ')
+    .toLowerCase();
+
+  return [
+    'allowlist',
+    'allow list',
+    'presale',
+    'private',
+    'token-gated',
+    'token gated',
+    'signed',
+    'fcfs',
+    'gtd',
+    'whitelist',
+    'team',
+    'community',
+  ].some((marker) => descriptor.includes(marker));
+};
 
 /** Accept a slug, contract address, or a full OpenSea collection/drop URL. */
 const normalizeOpenSeaReference = (value: string): string => {
@@ -165,10 +205,13 @@ export const DropStages = ({
         }
       }
 
+      const allowlist = isAllowlistStage(st);
       return {
         id: st.id || st.label || `stage-${idx}`,
         label: st.label || st.phase || `Stage ${idx + 1}`,
-        phase: st.phase || (st.label?.toLowerCase().includes('allowlist') || st.label?.toLowerCase().includes('presale') ? 'presale' : 'public'),
+        // Some OpenSea responses call FCFS/GTD stages "public".  The label
+        // is authoritative here because those stages need an exact action.
+        phase: allowlist ? 'presale' : (st.phase || 'public'),
         startTime: startSec,
         endTime: endSec,
         priceEth,
@@ -264,9 +307,7 @@ export const DropStages = ({
 
     try {
       const contractTarget = dropData?.contract_address || dropData?.address || dropData?.contracts?.[0]?.address || slug;
-      const stageDescriptor = `${stage.phase} ${stage.label}`.toLowerCase();
-      const isPresale = ['presale', 'allowlist', 'private', 'token-gated', 'token gated', 'signed']
-        .some((marker) => stageDescriptor.includes(marker));
+      const isPresale = isAllowlistStage(stage);
 
       const targetChain = dropData?.chain || selectedChain;
       const rawStageIndex = stage.raw?.stage_index ?? stage.raw?.stageIndex ?? stage.raw?.stage_id;
@@ -631,7 +672,9 @@ export const DropStages = ({
                                     chain: targetChain,
                                     slug: dropData?.slug || (!slug.startsWith('0x') ? slug : undefined),
                                     openseaApiKey: apiKey.trim() || undefined,
-                                    isAllowlist: stage.phase === 'presale' || stage.label.toLowerCase().includes('allowlist'),
+                                    isAllowlist: isAllowlistStage(stage),
+                                    stageLabel: stage.label,
+                                    stagePhase: stage.phase,
                                   });
                                 }}
                                 className="flex items-center justify-center gap-1.5 rounded-xl border border-synapse-emerald/30 bg-synapse-emerald/10 px-3 py-2 font-mono text-xs text-synapse-emerald transition-colors hover:bg-synapse-emerald/20"

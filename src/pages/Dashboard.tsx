@@ -784,7 +784,7 @@ export const Dashboard = () => {
                     ...prev,
                     contractAddress,
                     quantity: '1',
-                    isAllowlist: stage.phase === 'presale' || stage.label.toLowerCase().includes('allowlist'),
+                    isAllowlist: stage.phase === 'presale' || /allowlist|presale|private|signed|fcfs|gtd|whitelist|team|community/i.test(stage.label),
                     openSeaSlug: context.slug || '',
                     openSeaApiKey: context.openseaApiKey || ''
                   }));
@@ -799,6 +799,8 @@ export const Dashboard = () => {
                     openSeaSlug: context.slug,
                     openSeaApiKey: context.openseaApiKey,
                     isAllowlist: context.isAllowlist,
+                    stageLabel: context.stageLabel,
+                    stagePhase: context.stagePhase,
                   });
                   setActiveTab('scheduler');
                   addLog('INFO', `Drop stage, chain, OpenSea slug, API key, and scheduled time (${targetTime}) loaded into Scheduler.`, 'text-synapse-emerald');

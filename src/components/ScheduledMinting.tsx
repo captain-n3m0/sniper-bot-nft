@@ -20,6 +20,8 @@ export interface SchedulerDraft {
   openSeaSlug?: string;
   openSeaApiKey?: string;
   isAllowlist?: boolean;
+  stageLabel?: string;
+  stagePhase?: string;
 }
 
 interface SchedulerJobSummary {
@@ -166,6 +168,8 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         signature: form.signature,
         slug: form.openSeaSlug.trim() || undefined,
         openseaApiKey: form.openSeaApiKey.trim() || undefined,
+        stageLabel: initialDraft?.stageLabel || undefined,
+        stagePhase: initialDraft?.stagePhase || undefined,
         wallets: Array.from(selectedWalletIds).map(id => wallets.find(w => w.id === id)),
         chain: selectedChain
       };
