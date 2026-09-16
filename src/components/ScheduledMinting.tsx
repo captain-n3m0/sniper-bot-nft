@@ -138,7 +138,9 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
 
   useEffect(() => {
     void loadJobs();
-    const timer = setInterval(() => void loadJobs(true), 10_000);
+    // SSE normally updates active jobs in under a second. Keep a short
+    // polling fallback for browsers/proxies that do not support streaming.
+    const timer = setInterval(() => void loadJobs(true), 2_000);
     return () => clearInterval(timer);
   }, [authToken]);
 
