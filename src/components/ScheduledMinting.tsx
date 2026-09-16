@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Clock, CheckCircle2, Server, CheckSquare, Square, ShieldCheck, Loader2 } from 'lucide-react';
 import { StoredWallet } from './WalletManager';
 import { LiveTransactionFee } from './LiveTransactionFee';
@@ -65,6 +65,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobAction, setJobAction] = useState('');
   const [editingJobId, setEditingJobId] = useState<string | null>(null);
+  const schedulerStreams = useRef<Map<string, AbortController>>(new Map());
 
   const loadJobs = async (quiet = false) => {
     if (!authToken) return;
@@ -83,11 +84,81 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
     }
   };
 
+  const connectSchedulerStream = async (jobId: string) => {
+    if (!authToken || schedulerStreams.current.has(jobId)) return;
+    const controller = new AbortController();
+    schedulerStreams.current.set(jobId, controller);
+    try {
+      const response = await fetch(`/api/scheduler/jobs/${jobId}/stream`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) return;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (!controller.signal.aborted) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() || '';
+        for (const frame of frames) {
+          const event = frame.match(/^event:\s*(.+)$/m)?.[1]?.trim() || 'message';
+          const data = frame
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('\n');
+          if (event !== 'job' || !data) continue;
+          try {
+            const update = JSON.parse(data) as SchedulerJobSummary;
+            setJobs((current) => {
+              const index = current.findIndex((job) => job.id === update.id);
+              if (index < 0) return current;
+              const next = [...current];
+              next[index] = update;
+              return next;
+            });
+          } catch {
+            // Ignore malformed frames; the normal refresh remains the fallback.
+          }
+        }
+      }
+    } catch (streamError) {
+      if (!controller.signal.aborted) {
+        // Streaming is an enhancement; polling continues if a proxy does not
+        // support long-lived responses.
+        console.debug('Scheduler live stream unavailable', streamError);
+      }
+    } finally {
+      if (schedulerStreams.current.get(jobId) === controller) schedulerStreams.current.delete(jobId);
+    }
+  };
+
   useEffect(() => {
     void loadJobs();
-    const timer = setInterval(() => void loadJobs(true), 2_000);
+    const timer = setInterval(() => void loadJobs(true), 10_000);
     return () => clearInterval(timer);
   }, [authToken]);
+
+  useEffect(() => {
+    const activeIds = new Set(
+      jobs.filter((job) => job.status === 'pending' || job.status === 'running').map((job) => job.id),
+    );
+    activeIds.forEach((jobId) => void connectSchedulerStream(jobId));
+    schedulerStreams.current.forEach((controller, jobId) => {
+      if (!activeIds.has(jobId)) {
+        controller.abort();
+        schedulerStreams.current.delete(jobId);
+      }
+    });
+  }, [jobs, authToken]);
+
+  useEffect(() => () => {
+    schedulerStreams.current.forEach((controller) => controller.abort());
+    schedulerStreams.current.clear();
+  }, []);
 
   useEffect(() => {
     if (savedOpenSeaApiKey && !form.openSeaApiKey) {

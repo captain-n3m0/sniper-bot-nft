@@ -5164,6 +5164,54 @@ function ownedActiveSchedulerJob(req: Request): { session: AuthenticatedSession;
   return { session, job };
 }
 
+/**
+ * Stream scheduler state changes without putting the bearer token in a URL.
+ * The UI uses fetch() so it can send the normal Authorization header; this is
+ * intentionally SSE-shaped rather than a WebSocket so it also works through
+ * the existing nginx/proxy setup. A heartbeat keeps idle connections alive.
+ */
+app.get("/api/scheduler/jobs/:id/stream", (req, res) => {
+  const { job } = ownedActiveSchedulerJob(req);
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  let closed = false;
+  let lastSnapshot = "";
+  let lastHeartbeatAt = Date.now();
+  const send = (event: string, payload: unknown) => {
+    if (closed) return;
+    const data = JSON.stringify(payload);
+    res.write(`event: ${event}\ndata: ${data}\n\n`);
+  };
+  const sendSnapshot = () => {
+    if (closed) return;
+    const snapshot = schedulerPublic(job);
+    const serialized = JSON.stringify(snapshot);
+    if (serialized !== lastSnapshot) {
+      lastSnapshot = serialized;
+      send("job", snapshot);
+    }
+    if (Date.now() - lastHeartbeatAt >= 10_000) {
+      res.write(": heartbeat\n\n");
+      lastHeartbeatAt = Date.now();
+    }
+  };
+
+  sendSnapshot();
+  const timer = setInterval(sendSnapshot, 500);
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+  };
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+});
+
 app.put("/api/scheduler/jobs/:id", (req, res) => {
   const { job } = ownedActiveSchedulerJob(req);
   if (!['pending', 'paused'].includes(job.status)) {
