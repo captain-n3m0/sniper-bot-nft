@@ -29,6 +29,7 @@ interface SchedulerJobSummary {
   status: 'pending' | 'paused' | 'running' | 'completed' | 'failed' | 'stopped';
   chain: string;
   contractAddress: string;
+  mode?: 'public' | 'allowlist';
   targetTime?: string;
   targetBlock?: number;
   walletCount: number;
@@ -52,7 +53,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
     retryOnFailure: false,
     openSeaSlug: '',
     openSeaApiKey: '',
-    isAllowlist: false,
+    stageMode: 'public' as 'public' | 'allowlist',
     mintParams: '',
     salt: '',
     signature: ''
@@ -176,7 +177,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
       contractAddress: initialDraft.contractAddress,
       openSeaSlug: initialDraft.openSeaSlug || '',
       openSeaApiKey: initialDraft.openSeaApiKey || '',
-      isAllowlist: Boolean(initialDraft.isAllowlist),
+      stageMode: initialDraft.isAllowlist ? 'allowlist' : 'public',
     }));
   }, [initialDraft]);
 
@@ -218,7 +219,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
 
     try {
       let mintParamsObj;
-      if (form.isAllowlist && !form.openSeaSlug.trim()) {
+      if (form.stageMode === 'allowlist' && !form.openSeaSlug.trim()) {
         if (!form.mintParams || !form.salt || !form.signature) {
           throw new Error("Missing Allowlist signature payload");
         }
@@ -235,14 +236,23 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         quantity: requestedQuantity,
         feeTier: form.feeTier,
         retryOnFailure: form.retryOnFailure,
-        isAllowlist: form.isAllowlist,
+        isAllowlist: form.stageMode === 'allowlist',
         mintParams: mintParamsObj,
         salt: form.salt,
         signature: form.signature,
         slug: form.openSeaSlug.trim() || undefined,
         openseaApiKey: form.openSeaApiKey.trim() || undefined,
-        stageLabel: initialDraft?.stageLabel || undefined,
-        stagePhase: initialDraft?.stagePhase || undefined,
+        // Only forward metadata that matches the explicitly selected mode.
+        // This prevents changing an imported FCFS draft to Public from being
+        // overridden by the old FCFS label on the server.
+        stageLabel:
+          initialDraft && (initialDraft.isAllowlist ? form.stageMode === 'allowlist' : form.stageMode === 'public')
+            ? initialDraft.stageLabel
+            : undefined,
+        stagePhase:
+          initialDraft && (initialDraft.isAllowlist ? form.stageMode === 'allowlist' : form.stageMode === 'public')
+            ? initialDraft.stagePhase
+            : undefined,
         wallets: Array.from(selectedWalletIds).map(id => wallets.find(w => w.id === id)),
         chain: selectedChain
       };
@@ -271,7 +281,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
         retryOnFailure: false,
         openSeaSlug: '',
         openSeaApiKey: savedOpenSeaApiKey || '',
-        isAllowlist: false,
+        stageMode: 'public',
         mintParams: '',
         salt: '',
         signature: ''
@@ -292,7 +302,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
     setEditingJobId(job.id);
     setScheduledJob(null);
     setTargetTime(local);
-    setForm((current) => ({ ...current, contractAddress: job.contractAddress, quantity: String(job.quantity ?? 1), retryOnFailure: job.retryOnFailure, feeTier: job.feeTier || 'fast' }));
+    setForm((current) => ({ ...current, contractAddress: job.contractAddress, quantity: String(job.quantity ?? 1), retryOnFailure: job.retryOnFailure, feeTier: job.feeTier || 'fast', stageMode: job.mode || 'public' }));
     setSelectedWalletIds(new Set((job.wallets || []).map((wallet) => wallet.id)));
     setError('');
   };
@@ -461,6 +471,27 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
               </select>
               <p className="mt-2 text-xs text-neutral-500">Controls the EIP-1559 priority fee used at the scheduled time.</p>
             </div>
+            <div>
+              <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Mint Stage</label>
+              <select
+                value={form.stageMode}
+                disabled={Boolean(editingJobId)}
+                onChange={(e) => setForm({ ...form, stageMode: e.target.value as typeof form.stageMode })}
+                className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-3 font-mono text-sm text-neutral-300 outline-none focus:border-synapse-cyan/50 focus:bg-white/5 transition-colors [color-scheme:dark] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="public">Public · mintPublic()</option>
+                <option value="allowlist">FCFS / allowlist · mintSigned()</option>
+              </select>
+              <p className="mt-2 text-xs text-neutral-500">
+                {form.stageMode === 'allowlist'
+                  ? 'Uses OpenSea’s wallet-specific signed action. An OpenSea slug/API key or voucher is required.'
+                  : 'Uses the public SeaDrop stage, or OpenSea’s exact public action when a slug is supplied.'}
+              </p>
+              {editingJobId && <p className="mt-2 text-xs text-yellow-400">Stage mode cannot be changed while editing a queued job; create a new job to switch Public/FCFS.</p>}
+              {initialDraft?.stageLabel && (
+                <p className="mt-2 text-xs text-synapse-cyan">Selected from Drop Stages: {initialDraft.stageLabel}</p>
+              )}
+            </div>
           </div>
 
           <p className="text-xs text-neutral-500">Worker count is automatic: one concurrent worker per selected wallet, up to 50 wallets.</p>
@@ -496,20 +527,11 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
                 />
               </div>
             </div>
-            <p className="mt-3 text-xs leading-relaxed text-neutral-500">When a slug is provided, the server validates it now and requests fresh per-wallet calldata during the 30-second pre-arm window. The job and key are encrypted at rest and sensitive execution data is cleared after completion or stopping.</p>
+              <p className="mt-3 text-xs leading-relaxed text-neutral-500">When a slug is provided, the server validates it now and requests fresh per-wallet calldata during the pre-arm window. The job and key are encrypted at rest and sensitive execution data is cleared after completion or stopping.</p>
           </div>
 
           <div className="pt-4 border-t border-white/5">
-            <label className="flex items-center gap-3 cursor-pointer mb-4">
-              <input 
-                type="checkbox" 
-                checked={form.isAllowlist}
-                onChange={(e) => setForm({...form, isAllowlist: e.target.checked})}
-                className="accent-synapse-violet w-4 h-4 rounded"
-              />
-              <span className="text-sm font-medium text-neutral-300">Allowlist / Signed Phase</span>
-            </label>
-            <p className="text-xs text-neutral-500">With an OpenSea slug, signatures are fetched automatically per wallet. Without a slug, you must provide the manual voucher below.</p>
+            <p className="text-xs text-neutral-500">FCFS/GTD/allowlist stages use wallet-specific signatures. With an OpenSea slug, signatures are fetched automatically per wallet; without one, provide the manual voucher below.</p>
           </div>
 
           <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-4">
@@ -535,7 +557,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
             feeTier={form.feeTier}
           />
 
-          {form.isAllowlist && !form.openSeaSlug.trim() && (
+          {form.stageMode === 'allowlist' && !form.openSeaSlug.trim() && (
             <div className="space-y-4 rounded-xl border border-white/5 bg-black/30 p-4">
               <div>
                 <label className="mb-2 block text-xs font-mono uppercase tracking-widest text-neutral-500">Mint Params JSON</label>
