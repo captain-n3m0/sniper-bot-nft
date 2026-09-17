@@ -194,7 +194,7 @@ export const Documentation = () => {
           </DocSection>
 
           <DocSection id="scheduler" eyebrow="08 / Automation" title="Scheduling a mint">
-            <p>The scheduler accepts an exact ISO timestamp or target block and prepares every execution wallet independently. The internal loop checks time every 100 milliseconds, warms RPC connections 45 seconds before execution, and begins signing 30 seconds before the target. A failed OpenSea action for one wallet does not block wallets that are ready.</p>
+            <p>The scheduler accepts an exact ISO timestamp or target block and prepares every execution wallet independently. The internal loop checks time every 25 milliseconds, warms RPC connections 45 seconds before execution, and prefetches wallet-specific OpenSea actions once in the final 30 seconds. Signatures and broadcasts still start at the target time. A shared fee snapshot and per-wallet pending nonces keep signing parallel without redundant fee RPC calls. A failed OpenSea action for one wallet does not block wallets that are ready. If retry is enabled, failed wallets are retried immediately (with no added one-second sleep) for up to five minutes.</p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <Feature icon={CalendarClock} title="Target time">Use the drop’s authoritative start time. Confirm the timezone before saving the job.</Feature>
               <Feature icon={Gauge} title="Target block">Useful when activation is defined by block height rather than a wall-clock timestamp.</Feature>

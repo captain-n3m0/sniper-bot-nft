@@ -2147,7 +2147,17 @@ type SchedulerJobStatus = "pending" | "paused" | "running" | "completed" | "fail
 type SchedulerWalletStatus = "queued" | "preparing" | "ready" | "broadcasting" | "completed" | "failed" | "stopped";
 const MAX_SCHEDULER_WALLETS = 50;
 const MAX_SCHEDULER_WORKERS = 50;
-const SCHEDULER_RETRY_INTERVAL_MS = 1_000;
+// Wallet-specific FCFS actions are fetched once before launch and cached. A
+// wider bounded pool gives the launch path enough time to finish all wallets
+// without turning the scheduler into an unbounded OpenSea request flood.
+const OPENSEA_ACTION_PREFETCH_WINDOW_MS = 30_000;
+const OPENSEA_ACTION_WORKERS = 8;
+// Retry as soon as the previous attempt settles.  There is deliberately no
+// wall-clock backoff here: signing/broadcasting already yields to the event
+// loop and network I/O, so another attempt can begin without adding an
+// artificial one-second gap.  The five-minute retry deadline below still
+// prevents an unbounded loop.
+const SCHEDULER_RETRY_INTERVAL_MS = 0;
 
 interface SchedulerWalletTask {
   id: string;
@@ -2498,6 +2508,7 @@ async function scheduledOpenSeaTransaction(
   job: SchedulerJob,
   privateKey: string,
   cached?: SchedulerWalletTask["openSeaTransaction"],
+  sharedFees?: Promise<FeeSnapshot | undefined>,
 ) {
   const wallet = walletFromPrivateKey(privateKey);
   const transaction = cached
@@ -2509,10 +2520,11 @@ async function scheduledOpenSeaTransaction(
   // broadcast result and can trigger the configured wallet retry.
   const setup = await withRpcFallback(job.endpoints, async (url) => {
     const provider = providerFor(url, job.chain);
-    const [nonce, fees] = await Promise.all([
-      provider.getTransactionCount(wallet.address, "pending"),
-      getFeeSnapshot(provider),
-    ]);
+    const noncePromise = provider.getTransactionCount(wallet.address, "pending");
+    const feesPromise = sharedFees
+      ? sharedFees.then((fees) => fees || getFeeSnapshot(provider))
+      : getFeeSnapshot(provider);
+    const [nonce, fees] = await Promise.all([noncePromise, feesPromise]);
     return { nonce, fees: applyFeeTier(fees, job.feeTier) };
   });
   return wallet.signTransaction({
@@ -2559,15 +2571,20 @@ async function waitForSchedulerReceipt(
 // Local SeaDrop plans are already assembled when the job is created. For the
 // hot path, only fetch the pending nonce and current fee snapshot here; avoid a
 // second simulation and gas-estimation round trip immediately before mint time.
-async function signScheduledLocalTransaction(job: SchedulerJob, privateKey: string) {
+async function signScheduledLocalTransaction(
+  job: SchedulerJob,
+  privateKey: string,
+  sharedFees?: Promise<FeeSnapshot | undefined>,
+) {
   if (!job.plan) throw new Error("Scheduled on-chain mint plan is unavailable");
   const wallet = walletFromPrivateKey(privateKey);
   const setup = await withRpcFallback(job.endpoints, async (url) => {
     const provider = providerFor(url, job.chain);
-    const [nonce, fees] = await Promise.all([
-      provider.getTransactionCount(wallet.address, "pending"),
-      getFeeSnapshot(provider),
-    ]);
+    const noncePromise = provider.getTransactionCount(wallet.address, "pending");
+    const feesPromise = sharedFees
+      ? sharedFees.then((fees) => fees || getFeeSnapshot(provider))
+      : getFeeSnapshot(provider);
+    const [nonce, fees] = await Promise.all([noncePromise, feesPromise]);
     return { nonce, fees: applyFeeTier(fees, job.feeTier) };
   });
   return wallet.signTransaction({
@@ -2617,10 +2634,9 @@ export async function runSchedulerWorkerPool<T, R>(
 async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> {
   if (job.arming || !["pending", "running"].includes(job.status)) return;
   if (!force && job.nextArmAttemptAt > Date.now()) return;
-  // OpenSea actions are stage-sensitive. Fetch them once in a small window
-  // before a timed launch, cache the action, and defer wallet signing until the
-  // launch moment. This prevents a pre-arm loop from hammering OpenSea while a
-  // stage is still inactive.
+  // OpenSea actions are stage-sensitive. Fetch them once before a timed launch,
+  // cache the action, and defer wallet signing until the launch moment. This
+  // prevents a pre-arm loop from hammering OpenSea while a stage is inactive.
   const prefetchOpenSea = Boolean(
     job.openSea && job.targetTime !== undefined && Date.now() < job.targetTime,
   );
@@ -2639,11 +2655,19 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
   job.updatedAt = new Date().toISOString();
   persistSchedulerJob(job);
   job.arming = (async () => {
+    // A fee snapshot is identical for every wallet in this launch. Start one
+    // shared read while the worker pool fetches each wallet's pending nonce;
+    // this removes 2N block/fee RPC calls from the hot path without reusing
+    // nonces or weakening per-wallet isolation.
+    const sharedFees = prefetchOpenSea
+      ? undefined
+      : withRpcFallback(job.endpoints, (url) => getFeeSnapshot(providerFor(url, job.chain)))
+          .catch(() => undefined);
     const openSeaNeedsFetch = Boolean(
       job.openSea && candidates.some((wallet) => !wallet.openSeaTransaction),
     );
     const workerCount = job.openSea && (prefetchOpenSea || openSeaNeedsFetch)
-      ? Math.min(job.parallelWorkers, 4)
+      ? Math.min(job.parallelWorkers, OPENSEA_ACTION_WORKERS)
       : job.parallelWorkers;
     const settled = await runSchedulerWorkerPool(
       candidates,
@@ -2662,8 +2686,8 @@ async function armSchedulerJob(job: SchedulerJob, force = false): Promise<void> 
           };
         }
         const signedTransaction = job.openSea
-          ? await scheduledOpenSeaTransaction(job, wallet.privateKey, wallet.openSeaTransaction)
-          : await signScheduledLocalTransaction(job, wallet.privateKey);
+          ? await scheduledOpenSeaTransaction(job, wallet.privateKey, wallet.openSeaTransaction, sharedFees)
+          : await signScheduledLocalTransaction(job, wallet.privateKey, sharedFees);
         return { wallet, signedTransaction, openSeaTransaction: undefined };
       },
     );
@@ -2842,10 +2866,13 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
         wallet.signedTransaction = undefined;
         if (job.openSea) wallet.openSeaTransaction = undefined;
       });
-      job.error = `Retrying ${failedNow.length} failed wallet(s) in 1 second`;
+      job.error = `Retrying ${failedNow.length} failed wallet(s) immediately`;
       job.updatedAt = new Date().toISOString();
       persistSchedulerJob(job);
-      await new Promise((resolve) => setTimeout(resolve, SCHEDULER_RETRY_INTERVAL_MS));
+      // Yield once so status/SSE updates flush before the next attempt, but do
+      // not sleep. The next arm still performs asynchronous RPC work, so this
+      // cannot spin synchronously even when a wallet fails immediately.
+      await Promise.resolve();
     }
     const completed = job.wallets.filter((wallet) => wallet.status === "completed");
     const failed = job.wallets.filter((wallet) => wallet.status === "failed");
@@ -2885,8 +2912,9 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
 async function warmRpcEndpoints(job: SchedulerJob) {
   if (job.warmed) return;
   job.warmed = true;
+  const warmUrls = [...new Set([...job.endpoints, ...(job.chain.broadcastUrls || [])])];
   await Promise.allSettled(
-    job.endpoints.map((url) => providerFor(url, job.chain).send("eth_chainId", [])),
+    warmUrls.map((url) => providerFor(url, job.chain).send("eth_chainId", [])),
   );
 }
 
@@ -2902,10 +2930,10 @@ async function schedulerTick() {
         const remaining = job.targetTime - now;
         if (remaining <= 90_000) void warmRpcEndpoints(job);
         // Local plans can be signed earlier because calldata is immutable.
-        // OpenSea actions are prefetched only in the final five seconds; they
-        // are cached and signed at launch so an inactive-stage response does
-        // not trigger a minute of repeated API calls.
-        const armWindow = job.openSea ? 5_000 : 60_000;
+        // OpenSea actions are prefetched once in the final 30 seconds; they
+        // are cached and signed at launch. A failed prefetch is held until the
+        // target, rather than retried on every scheduler tick.
+        const armWindow = job.openSea ? OPENSEA_ACTION_PREFETCH_WINDOW_MS : 60_000;
         if (remaining <= armWindow && remaining > 0) void armSchedulerJob(job);
         if (remaining <= 0) void executeSchedulerJob(job);
         continue;
@@ -2958,7 +2986,10 @@ async function schedulerTick() {
   }
 }
 
-const schedulerInterval = setInterval(() => void schedulerTick(), 100);
+// Keep the launch check tight enough that a scheduled job is not held behind
+// the previous 100ms polling quantum. RPC/signing latency remains the dominant
+// cost, but a 25ms tick removes avoidable scheduler jitter at negligible load.
+const schedulerInterval = setInterval(() => void schedulerTick(), 25);
 schedulerInterval.unref();
 
 interface NonceRecord {

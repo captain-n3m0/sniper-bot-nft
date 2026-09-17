@@ -146,7 +146,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
   }, [authToken]);
 
   useEffect(() => {
-    const activeIds = new Set(
+    const activeIds = new Set<string>(
       jobs.filter((job) => job.status === 'pending' || job.status === 'running').map((job) => job.id),
     );
     activeIds.forEach((jobId) => void connectSchedulerStream(jobId));
@@ -542,7 +542,7 @@ export const ScheduledMinting = ({ wallets, addLog, selectedChain, authToken, sa
               className="mt-0.5 h-4 w-4 accent-yellow-500"
             />
             <span>
-              <span className="block text-sm font-medium text-yellow-300">Retry failed wallets every 1 second</span>
+              <span className="block text-sm font-medium text-yellow-300">Retry failed wallets immediately</span>
               <span className="mt-1 block text-xs text-neutral-500">Successful wallets are never repeated. Retries run for up to 5 minutes and stop automatically when the job is no longer actionable.</span>
             </span>
           </label>
