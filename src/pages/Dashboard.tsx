@@ -402,7 +402,10 @@ export const Dashboard = () => {
 
         const prepareRes = await fetch('/api/prepare-mint', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
           body: JSON.stringify(payload)
         });
 
@@ -444,7 +447,10 @@ export const Dashboard = () => {
 
         const blastRes = await fetch('/api/blast-mint', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
           body: JSON.stringify({
             chain: selectedChain,
             transaction: prepared.transaction,
