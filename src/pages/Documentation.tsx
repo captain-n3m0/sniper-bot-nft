@@ -168,7 +168,7 @@ export const Documentation = () => {
               <Field name="Contract / slug">The NFT contract or OpenSea collection identifier.</Field>
               <Field name="Quantity">Tokens minted by each selected execution wallet.</Field>
               <Field name="Parallel workers">Scheduler concurrency is automatic: one worker per selected wallet, capped at 50 wallets.</Field>
-              <Field name="RPC routing">Alchemy is configured securely on the backend and placed ahead of public fallback RPCs.</Field>
+              <Field name="RPC routing">Alchemy is configured securely on the backend and placed ahead of public fallback RPCs. Optional keyed write endpoints can be supplied with the server-side RPC_BROADCAST_URLS_* variables; they are raced in parallel with the network sequencer and never exposed to the browser.</Field>
               <Field name="OpenSea key">Used server-side to request wallet-specific unsigned mint actions.</Field>
               <Field name="Execution wallets">The exact imported wallets that will sign and broadcast.</Field>
             </div>
@@ -208,7 +208,7 @@ export const Documentation = () => {
                 ['Ethereum', '1', 'ETH', 'Etherscan'], ['Base', '8453', 'ETH', 'Basescan'], ['Polygon', '137', 'POL', 'Polygonscan'], ['Arbitrum One', '42161', 'ETH', 'Arbiscan'], ['Optimism', '10', 'ETH', 'OP Etherscan'], ['Robinhood Chain', '4663', 'ETH', 'Blockscout'], ['Sepolia', '11155111', 'ETH', 'Sepolia Etherscan'],
               ].map((row) => <tr key={row[1]} className="border-t border-white/5 text-neutral-400"><td className="px-4 py-4 text-white">{row[0]}</td><td className="px-4 py-4 font-mono">{row[1]}</td><td className="px-4 py-4 font-mono">{row[2]}</td><td className="px-4 py-4">{row[3]}</td></tr>)}</tbody></table>
             </div>
-            <p>RPC failover distinguishes transport failures such as timeouts, rate limits, and 5xx responses from valid EVM execution outcomes. Contract reverts are returned immediately instead of being hidden by unnecessary endpoint retries.</p>
+            <p>RPC failover distinguishes transport failures such as timeouts, rate limits, and 5xx responses from valid EVM execution outcomes. Contract reverts are returned immediately instead of being hidden by unnecessary endpoint retries. Robinhood Chain supports managed endpoints from Alchemy, Chainstack, QuickNode, Blockdaemon, dRPC, and Validation Cloud; benchmark a keyed endpoint from the production region before making it primary.</p>
           </DocSection>
 
           <DocSection id="operations" eyebrow="10 / Observability" title="Metrics and system status">

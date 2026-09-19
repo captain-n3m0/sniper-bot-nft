@@ -527,6 +527,28 @@ function providerFor(url: string, chain: ChainConfig): JsonRpcProvider {
   return provider;
 }
 
+/**
+ * Return endpoints used for transaction submission. Read endpoints and
+ * submission endpoints are intentionally separate: a provider may expose a
+ * low-latency write path (or a sequencer path) that is not suitable for
+ * ordinary eth_* reads. Configured write endpoints are tried in parallel with
+ * the built-in sequencer and read endpoints, so the first accepted transaction
+ * wins without making the hot path wait on a single provider.
+ */
+function broadcastRpcUrlsFor(chain: ChainConfig, readEndpoints: string[]): string[] {
+  const configured = parseUrlList(
+    process.env[`RPC_BROADCAST_URLS_${chain.key.toUpperCase()}`] ||
+      process.env[`RPC_BROADCAST_URL_${chain.key.toUpperCase()}`],
+  );
+  return [
+    ...new Set([
+      ...configured,
+      ...(chain.broadcastUrls || []),
+      ...readEndpoints,
+    ]),
+  ].slice(0, 24);
+}
+
 function requireChain(value: unknown): ChainConfig {
   const chain = resolveChain(value);
   if (!chain) {
@@ -1344,44 +1366,27 @@ function persistMintLog(input: MintLogInput) {
   }
 }
 
-async function sendRawTransaction(url: string, signedTx: string, expectedHash: string) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+async function sendRawTransaction(
+  url: string,
+  signedTx: string,
+  expectedHash: string,
+  chain: ChainConfig,
+) {
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json",
-        "user-agent": USER_AGENT,
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_sendRawTransaction",
-        params: [signedTx],
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const error = new Error(`RPC HTTP ${response.status}`) as Error & { status?: number };
-      error.status = response.status;
-      throw error;
+    // Reuse the same cached JsonRpcProvider/FetchRequest used by the rest of
+    // the server. This keeps the TCP/TLS connection warm between scheduler
+    // launches instead of creating a fresh fetch connection per wallet.
+    const result = await providerFor(url, chain).send("eth_sendRawTransaction", [signedTx]);
+    if (typeof result === "string" && result) {
+      return { txHash: result, rpc: maskRpcUrl(url) };
     }
-    const result = (await response.json()) as {
-      result?: string;
-      error?: { code?: number; message?: string };
-    };
-    if (result.result) return { txHash: result.result, rpc: maskRpcUrl(url) };
-    const rpcMessage = result.error?.message || "RPC rejected transaction";
-    if (/already known|known transaction|already imported/i.test(rpcMessage)) {
+    throw new Error("RPC rejected transaction");
+  } catch (error) {
+    const message = errorMessage(error);
+    if (/already known|known transaction|already imported/i.test(message)) {
       return { txHash: expectedHash, rpc: maskRpcUrl(url) };
     }
-    const error = new Error(rpcMessage) as Error & { code?: number };
-    error.code = result.error?.code;
     throw error;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -1402,9 +1407,9 @@ async function broadcastSignedTransaction(
     throw new ApiError(400, "signedTx chainId does not match the requested chain");
   }
   const txHash = parsed.hash || keccak256(signedTx);
-  const submissionEndpoints = [...new Set([...endpoints, ...(chain.broadcastUrls || [])])];
+  const submissionEndpoints = broadcastRpcUrlsFor(chain, endpoints);
   const attempts = submissionEndpoints.map((url) =>
-    sendRawTransaction(url, signedTx, txHash).then(
+    sendRawTransaction(url, signedTx, txHash, chain).then(
       (result) => ({ ...result, accepted: true, url }),
       (error) => Promise.reject({ error, url }),
     ),
@@ -2912,7 +2917,7 @@ async function executeSchedulerJob(job: SchedulerJob): Promise<void> {
 async function warmRpcEndpoints(job: SchedulerJob) {
   if (job.warmed) return;
   job.warmed = true;
-  const warmUrls = [...new Set([...job.endpoints, ...(job.chain.broadcastUrls || [])])];
+  const warmUrls = broadcastRpcUrlsFor(job.chain, job.endpoints);
   await Promise.allSettled(
     warmUrls.map((url) => providerFor(url, job.chain).send("eth_chainId", [])),
   );
